@@ -6,7 +6,7 @@ import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { TrendingUp } from "lucide-react";
 
 const tabs = [
-  { icon: LayoutDashboard, label: "Home", path: "/" },
+  { icon: LayoutDashboard, label: "Home", path: "/dashboard" },
   { icon: BookOpen, label: "Trades", path: "/trades" },
   { icon: BarChart3, label: "Analytics", path: "/analytics" },
   { icon: Calendar, label: "Calendar", path: "/calendar" },

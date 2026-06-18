@@ -3,7 +3,7 @@ import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "rec
 import { format } from "date-fns";
 
 const PERIODS = ["1W", "1M", "3M", "6M", "All"];
-const STARTING_BALANCE = 10000;
+// startingBalance is passed from context — no more hardcoding
 
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
@@ -18,23 +18,23 @@ const CustomTooltip = ({ active, payload, label }) => {
   );
 };
 
-export default function BalanceChart({ trades }) {
+export default function BalanceChart({ trades, startingBalance = 0 }) {
   const [period, setPeriod] = useState("All");
 
   const { data, currentBalance, changePct } = useMemo(() => {
-    if (!trades?.length) return { data: [], currentBalance: STARTING_BALANCE, changePct: 0 };
+    if (!trades?.length) return { data: [], currentBalance: startingBalance, changePct: 0 };
 
     const now = new Date();
     const cutoffs = { "1W": 7, "1M": 30, "3M": 90, "6M": 180 };
     const days = cutoffs[period];
 
-    let filtered = [...trades].filter(t => t.close_time || t.created_date);
-    filtered.sort((a, b) => new Date(a.close_time || a.created_date) - new Date(b.close_time || b.created_date));
+    let filtered = [...trades].filter(t => t.close_time || t.created_at);
+    filtered.sort((a, b) => new Date(a.close_time || a.created_at) - new Date(b.close_time || b.created_at));
 
-    let balance = STARTING_BALANCE;
+    let balance = startingBalance;
     const allPoints = filtered.map(t => {
       balance += t.net_pnl || t.pnl || 0;
-      return { date: new Date(t.close_time || t.created_date), balance: Math.round(balance * 100) / 100 };
+      return { date: new Date(t.close_time || t.created_at), balance: Math.round(balance * 100) / 100 };
     });
 
     let points = allPoints;
@@ -44,10 +44,11 @@ export default function BalanceChart({ trades }) {
     }
 
     const labeled = points.map(p => ({ name: format(p.date, "MMM d"), balance: p.balance }));
-    const final = labeled[labeled.length - 1]?.balance ?? STARTING_BALANCE;
-    const pct = ((final - STARTING_BALANCE) / STARTING_BALANCE) * 100;
+    const final = labeled[labeled.length - 1]?.balance ?? startingBalance;
+    const base = startingBalance > 0 ? startingBalance : 1;
+    const pct = ((final - startingBalance) / base) * 100;
     return { data: labeled, currentBalance: final, changePct: pct };
-  }, [trades, period]);
+  }, [trades, period, startingBalance]);
 
   const isProfit = changePct >= 0;
 

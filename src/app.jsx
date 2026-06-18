@@ -1,7 +1,7 @@
 import { Toaster } from "@/components/ui/toaster"
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClientInstance } from '@/lib/query-client'
-import { BrowserRouter as Router, Route, Routes, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Route, Routes, Navigate, useSearchParams } from 'react-router-dom';
 import PageNotFound from './lib/PageNotFound';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
 import ProtectedRoute from '@/components/ProtectedRoute';
@@ -31,29 +31,63 @@ import Timeline from '@/pages/Timeline';
 // Layout
 import AppLayout from '@/components/layout/AppLayout';
 
-const AuthenticatedApp = () => {
-  const { isLoadingAuth, authChecked } = useAuth();
+/**
+ * Renders the landing page, but bypasses the auth redirect when
+ * the ?preview=1 query param is present.  This lets logged-in users
+ * view the landing page from the sidebar link without creating a
+ * duplicate /landing route.
+ */
+const LandingRoute = ({ isAuthenticated }) => {
+  const [searchParams] = useSearchParams();
+  const preview = searchParams.get('preview') === '1';
+  if (isAuthenticated && !preview) {
+    return <Navigate to="/dashboard" replace />;
+  }
+  return <Landing />;
+};
 
+const AuthenticatedApp = () => {
+  const { isLoadingAuth, authChecked, isAuthenticated } = useAuth();
+
+  // Show spinner only for protected routes while auth is resolving.
+  // Public routes (Landing, login, register, etc.) render immediately.
   if (isLoadingAuth || !authChecked) {
     return (
-      <div className="dark fixed inset-0 flex items-center justify-center bg-background">
-        <div className="w-8 h-8 border-4 border-muted border-t-primary rounded-full animate-spin"></div>
-      </div>
+      <Routes>
+        {/* Always-public routes — render without waiting for auth */}
+        <Route path="/" element={<Landing />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
+        <Route path="/p/:slug" element={<PublicSharedView />} />
+        {/* Everything else shows a spinner while auth resolves */}
+        <Route path="*" element={
+          <div className="dark fixed inset-0 flex items-center justify-center bg-background">
+            <div className="w-8 h-8 border-4 border-muted border-t-primary rounded-full animate-spin"></div>
+          </div>
+        } />
+      </Routes>
     );
   }
 
   return (
     <Routes>
-      <Route path="/welcome" element={<Landing />} />
+      {/* Landing page — authenticated users are redirected to /dashboard
+          unless ?preview=1 is present in the URL. */}
+      <Route path="/" element={<LandingRoute isAuthenticated={isAuthenticated} />} />
       <Route path="/p/:slug" element={<PublicSharedView />} />
-      <Route path="/login" element={<Login />} />
-      <Route path="/register" element={<Register />} />
+
+      {/* Auth pages — redirect already-authenticated users to /dashboard */}
+      <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <Login />} />
+      <Route path="/register" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <Register />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/reset-password" element={<ResetPassword />} />
 
+      {/* Protected app routes */}
       <Route element={<ProtectedRoute unauthenticatedElement={<Navigate to="/login" replace />} />}>
         <Route element={<AppLayout />}>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/trades" element={<Trades />} />
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/calendar" element={<ProfitCalendar />} />

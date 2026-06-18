@@ -6,7 +6,7 @@ import { Link } from "react-router-dom";
 
 export default function RecentTrades({ trades }) {
   const recent = trades
-    ?.sort((a, b) => new Date(b.close_time || b.created_date) - new Date(a.close_time || a.created_date))
+    ?.sort((a, b) => new Date(b.close_time || b.created_at) - new Date(a.close_time || a.created_at))
     .slice(0, 8);
 
   if (!recent?.length) {

@@ -3,6 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Upload, FileText, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { entities } from "@/api/entities";
+import { supabase } from "@/api/supabaseClient";
 import { useQueryClient } from "@tanstack/react-query";
 
 /**
@@ -96,7 +97,6 @@ export default function ImportTradesDialog({ open, onClose }) {
     setLoading(true);
     try {
       // Insert one by one (Supabase JS v2 supports batch insert via array)
-      const { supabase } = await import("@/api/supabaseClient");
       const { data: { user } } = await supabase.auth.getUser();
       const payload = preview.map(t => ({ ...t, user_id: user.id }));
       const { error } = await supabase.from("trades").insert(payload);

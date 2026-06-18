@@ -26,7 +26,7 @@ export default function CalendarMonthStats({ trades, currentMonth }) {
     const end = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0);
 
     const monthTrades = trades.filter(t => {
-      const d = t.close_time || t.created_date;
+      const d = t.close_time || t.created_at;
       if (!d) return false;
       const date = new Date(d);
       return date >= start && date <= end;
@@ -37,7 +37,7 @@ export default function CalendarMonthStats({ trades, currentMonth }) {
     // Group by day
     const byDay = {};
     monthTrades.forEach(t => {
-      const key = format(new Date(t.close_time || t.created_date), "yyyy-MM-dd");
+      const key = format(new Date(t.close_time || t.created_at), "yyyy-MM-dd");
       if (!byDay[key]) byDay[key] = { pnl: 0, trades: 0 };
       byDay[key].pnl += t.net_pnl || t.pnl || 0;
       byDay[key].trades++;

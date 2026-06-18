@@ -42,7 +42,7 @@ export default function RiskStatsPanel({ trades, startingBalance = 10000 }) {
     let peak = startingBalance;
     let maxDrawdown = 0;
     let balance = startingBalance;
-    const sorted = [...closedTrades].sort((a, b) => new Date(a.close_time || a.created_date) - new Date(b.close_time || b.created_date));
+    const sorted = [...closedTrades].sort((a, b) => new Date(a.close_time || a.created_at) - new Date(b.close_time || b.created_at));
     sorted.forEach(t => {
       balance += (t.net_pnl || t.pnl || 0);
       if (balance > peak) peak = balance;

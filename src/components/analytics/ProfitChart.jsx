@@ -27,17 +27,17 @@ export default function ProfitChart({ trades }) {
     const cutoffs = { "1W": 7, "1M": 30, "3M": 90, "6M": 180 };
     const days = cutoffs[period];
 
-    let filtered = [...trades].filter(t => t.close_time || t.created_date);
+    let filtered = [...trades].filter(t => t.close_time || t.created_at);
     if (days) {
       const cutoff = new Date(now.getTime() - days * 86400000);
-      filtered = filtered.filter(t => new Date(t.close_time || t.created_date) >= cutoff);
+      filtered = filtered.filter(t => new Date(t.close_time || t.created_at) >= cutoff);
     }
-    filtered.sort((a, b) => new Date(a.close_time || a.created_date) - new Date(b.close_time || b.created_date));
+    filtered.sort((a, b) => new Date(a.close_time || a.created_at) - new Date(b.close_time || b.created_at));
 
     let cumulative = 0;
     const points = filtered.map(t => {
       cumulative += t.net_pnl || t.pnl || 0;
-      const d = new Date(t.close_time || t.created_date);
+      const d = new Date(t.close_time || t.created_at);
       return {
         name: format(d, "MMM d"),
         profit: Math.round(cumulative * 100) / 100,

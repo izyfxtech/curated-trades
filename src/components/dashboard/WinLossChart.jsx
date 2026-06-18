@@ -21,7 +21,7 @@ export default function WinLossChart({ trades }) {
     if (!trades?.length) return [];
     const grouped = {};
     trades.forEach(t => {
-      const d = new Date(t.close_time || t.created_date);
+      const d = new Date(t.close_time || t.created_at);
       // Use a proper date key to avoid fraction-looking labels
       const key = format(d, "yyyy-MM-dd");
       const label = format(d, "MMM d");

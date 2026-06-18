@@ -22,7 +22,17 @@ function parseOrder(orderStr) {
   return { column, ascending };
 }
 
+// Tables that have a user_id column (for auto-inject on create)
+const USER_OWNED_TABLES = new Set(['trades', 'accounts', 'strategies', 'journal_templates', 'shared_views']);
+
+async function getCurrentUserId() {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.user?.id ?? null;
+}
+
 function makeEntity(table) {
+  const isUserOwned = USER_OWNED_TABLES.has(table);
+
   return {
     async list(orderBy = '-created_at', limit = 1000) {
       const { column, ascending } = parseOrder(orderBy);
@@ -45,9 +55,15 @@ function makeEntity(table) {
     },
 
     async create(payload) {
+      // Auto-inject user_id so RLS insert check passes
+      let enriched = { ...payload };
+      if (isUserOwned && !enriched.user_id) {
+        const uid = await getCurrentUserId();
+        if (uid) enriched.user_id = uid;
+      }
       const { data, error } = await supabase
         .from(table)
-        .insert(payload)
+        .insert(enriched)
         .select()
         .single();
       if (error) throw error;

@@ -6,9 +6,9 @@ export function calcStats(trades) {
     avgDuration: 0, expectancy: 0
   };
 
-  const wins = trades.filter(t => (t.pnl || 0) > 0);
-  const losses = trades.filter(t => (t.pnl || 0) < 0);
-  const breakevens = trades.filter(t => (t.pnl || 0) === 0);
+  const wins = trades.filter(t => (t.net_pnl ?? t.pnl ?? 0) > 0);
+  const losses = trades.filter(t => (t.net_pnl ?? t.pnl ?? 0) < 0);
+  const breakevens = trades.filter(t => (t.net_pnl ?? t.pnl ?? 0) === 0);
 
   const totalPnl = trades.reduce((s, t) => s + (t.net_pnl || t.pnl || 0), 0);
   const totalWinAmount = wins.reduce((s, t) => s + (t.net_pnl || t.pnl || 0), 0);

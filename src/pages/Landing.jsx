@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
-import { TrendingUp, BarChart3, BookOpen, Target, Share2, Calendar, ChevronRight, Check, ArrowRight, Star, Zap, Shield, Clock } from "lucide-react";
+import { TrendingUp, BarChart3, BookOpen, Target, Share2, Calendar, ChevronRight, Check, ArrowRight, Star, Zap, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const NAV_LINKS = [

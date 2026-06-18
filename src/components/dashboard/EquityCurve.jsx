@@ -14,21 +14,21 @@ const CustomTooltip = ({ active, payload, label }) => {
   );
 };
 
-export default function EquityCurve({ trades }) {
+export default function EquityCurve({ trades, startingBalance = 0 }) {
   const data = React.useMemo(() => {
     if (!trades?.length) return [];
-    const sorted = [...trades].sort((a, b) => new Date(a.close_time || a.created_date) - new Date(b.close_time || b.created_date));
-    let balance = 10000;
+    const sorted = [...trades].sort((a, b) => new Date(a.close_time || a.created_at) - new Date(b.close_time || b.created_at));
+    let balance = startingBalance;
     return sorted.map((t, i) => {
       balance += (t.net_pnl || t.pnl || 0);
-      const d = new Date(t.close_time || t.created_date);
+      const d = new Date(t.close_time || t.created_at);
       return {
         name: format(d, "MMM d"),
         balance: Math.round(balance * 100) / 100,
         index: i,
       };
     });
-  }, [trades]);
+  }, [trades, startingBalance]);
 
   if (!data.length) {
     return (

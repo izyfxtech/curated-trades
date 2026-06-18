@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { entities } from '@/api/entities';
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useTradeFilter } from "@/lib/TradeFilterContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -10,36 +11,52 @@ import { Plus, Wallet, Pencil, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatCurrency } from "@/lib/tradeUtils";
 import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/components/ui/use-toast";
 
 export default function Accounts() {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ name: "", platform: "", broker: "", starting_balance: "", currency: "USD", is_active: true });
   const queryClient = useQueryClient();
+  const { toast } = useToast();
+
+  const { filteredTrades: trades } = useTradeFilter();
 
   const { data: accounts = [] } = useQuery({
     queryKey: ["accounts"],
-    queryFn: () => entities.Account.list("-created_date"),
-  });
-
-  const { data: trades = [] } = useQuery({
-    queryKey: ["trades"],
-    queryFn: () => entities.Trade.list("-close_time", 500),
+    queryFn: () => entities.Account.list("-created_at"),
   });
 
   const createMutation = useMutation({
     mutationFn: (data) => entities.Account.create({ ...data, starting_balance: parseFloat(data.starting_balance) || 0 }),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["accounts"] }); setShowForm(false); },
+    onError: (err) => {
+      const isDuplicate = err?.message?.includes("unique") || err?.code === "23505";
+      toast({
+        title: "Failed to create account",
+        description: isDuplicate ? "An account with that name already exists." : (err?.message || "Something went wrong."),
+        variant: "destructive",
+      });
+    },
   });
 
   const updateMutation = useMutation({
     mutationFn: ({ id, data }) => entities.Account.update(id, { ...data, starting_balance: parseFloat(data.starting_balance) || 0 }),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["accounts"] }); setShowForm(false); setEditing(null); },
+    onError: (err) => {
+      const isDuplicate = err?.message?.includes("unique") || err?.code === "23505";
+      toast({
+        title: "Failed to update account",
+        description: isDuplicate ? "An account with that name already exists." : (err?.message || "Something went wrong."),
+        variant: "destructive",
+      });
+    },
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id) => entities.Account.delete(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+    onError: (err) => toast({ title: "Failed to delete account", description: err?.message || "Something went wrong.", variant: "destructive" }),
   });
 
   const handleSave = () => {

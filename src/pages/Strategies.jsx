@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { entities } from '@/api/entities';
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useTradeFilter } from "@/lib/TradeFilterContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,36 +12,52 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Plus, Target, Pencil, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { calcStats, formatCurrency } from "@/lib/tradeUtils";
+import { useToast } from "@/components/ui/use-toast";
 
 export default function Strategies() {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ name: "", description: "", rules: "", timeframe: "", status: "active" });
   const queryClient = useQueryClient();
+  const { toast } = useToast();
+
+  const { filteredTrades: trades } = useTradeFilter();
 
   const { data: strategies = [] } = useQuery({
     queryKey: ["strategies"],
-    queryFn: () => entities.Strategy.list("-created_date"),
-  });
-
-  const { data: trades = [] } = useQuery({
-    queryKey: ["trades"],
-    queryFn: () => entities.Trade.list("-close_time", 500),
+    queryFn: () => entities.Strategy.list("-created_at"),
   });
 
   const createMutation = useMutation({
     mutationFn: (data) => entities.Strategy.create(data),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["strategies"] }); setShowForm(false); },
+    onError: (err) => {
+      const isDuplicate = err?.message?.includes("unique") || err?.code === "23505";
+      toast({
+        title: "Failed to create strategy",
+        description: isDuplicate ? "A strategy with that name already exists." : (err?.message || "Something went wrong."),
+        variant: "destructive",
+      });
+    },
   });
 
   const updateMutation = useMutation({
     mutationFn: ({ id, data }) => entities.Strategy.update(id, data),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["strategies"] }); setShowForm(false); setEditing(null); },
+    onError: (err) => {
+      const isDuplicate = err?.message?.includes("unique") || err?.code === "23505";
+      toast({
+        title: "Failed to update strategy",
+        description: isDuplicate ? "A strategy with that name already exists." : (err?.message || "Something went wrong."),
+        variant: "destructive",
+      });
+    },
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id) => entities.Strategy.delete(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategies"] }),
+    onError: (err) => toast({ title: "Failed to delete strategy", description: err?.message || "Something went wrong.", variant: "destructive" }),
   });
 
   const handleSave = () => {

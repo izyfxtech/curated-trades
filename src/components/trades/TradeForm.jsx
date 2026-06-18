@@ -139,11 +139,14 @@ export default function TradeForm({ trade, open, onClose, onSave }) {
     }
 
     // Status: open if no exit price/close time
+    const resolvedPnl = data.net_pnl ?? data.pnl;
     if (!data.exit_price && !data.close_time) {
       data.outcome = "open";
-    } else if (data.pnl > 0) {
+    } else if (resolvedPnl == null) {
+      data.outcome = "open";
+    } else if (resolvedPnl > 0) {
       data.outcome = "win";
-    } else if (data.pnl < 0) {
+    } else if (resolvedPnl < 0) {
       data.outcome = "loss";
     } else {
       data.outcome = "breakeven";
@@ -475,7 +478,7 @@ export default function TradeForm({ trade, open, onClose, onSave }) {
       </Dialog>
 
       {/* Leave warning */}
-      <AlertDialog open={showLeaveWarning} onOpenChange={setShowLeaveWarning}>
+      <AlertDialog open={showLeaveWarning} onOpenChange={(open) => { if (!open) setShowLeaveWarning(false); }}>
         <AlertDialogContent className="bg-card border-border">
           <AlertDialogHeader>
             <AlertDialogTitle>Unsaved changes</AlertDialogTitle>
@@ -484,15 +487,25 @@ export default function TradeForm({ trade, open, onClose, onSave }) {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter className="flex-col sm:flex-row gap-2">
-            <AlertDialogCancel onClick={() => setShowLeaveWarning(false)} className="text-sm">
+            {/* AlertDialogCancel is the Radix primitive that properly closes the dialog */}
+            <AlertDialogCancel
+              className="text-sm"
+              onClick={() => setShowLeaveWarning(false)}
+            >
               Keep working
             </AlertDialogCancel>
-            <Button variant="outline" onClick={handleDiscard} className="text-sm text-destructive border-destructive/30 hover:bg-destructive/10">
+            <AlertDialogAction
+              className="text-sm bg-destructive/10 text-destructive border border-destructive/30 hover:bg-destructive/20 hover:text-destructive"
+              onClick={handleDiscard}
+            >
               Discard changes
-            </Button>
-            <Button onClick={handleSaveDraft} className="text-sm">
+            </AlertDialogAction>
+            <AlertDialogAction
+              className="text-sm"
+              onClick={handleSaveDraft}
+            >
               Save trade
-            </Button>
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

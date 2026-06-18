@@ -1,16 +1,12 @@
 import React, { useMemo } from "react";
-import { entities } from '@/api/entities';
-import { useQuery } from "@tanstack/react-query";
+import { useTradeFilter } from "@/lib/TradeFilterContext";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { ArrowUpRight, ArrowDownRight, BookOpen, Star } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 export default function Timeline() {
-  const { data: trades = [], isLoading } = useQuery({
-    queryKey: ["trades"],
-    queryFn: () => entities.Trade.list("-close_time", 200),
-  });
+  const { filteredTrades: trades, tradesLoading: isLoading } = useTradeFilter();
 
   const events = useMemo(() => {
     const list = [];
@@ -22,7 +18,7 @@ export default function Timeline() {
         list.push({ type: "close", trade: t, date: new Date(t.close_time) });
       }
       if (t.notes) {
-        list.push({ type: "journal", trade: t, date: new Date(t.close_time || t.created_date) });
+        list.push({ type: "journal", trade: t, date: new Date(t.close_time || t.created_at) });
       }
     });
     return list.sort((a, b) => b.date - a.date);

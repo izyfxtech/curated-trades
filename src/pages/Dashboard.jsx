@@ -1,6 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { entities } from '@/api/entities';
-import { useQuery } from "@tanstack/react-query";
+import { useTradeFilter } from "@/lib/TradeFilterContext";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 import { DollarSign, Target, TrendingUp, BarChart3, Percent, Zap, Settings2, Plus, Check, GripVertical } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -43,11 +42,7 @@ export default function Dashboard() {
   const [isEditing, setIsEditing] = useState(false);
   const [showAddSidebar, setShowAddSidebar] = useState(false);
 
-  const { data: trades = [], isLoading } = useQuery({
-    queryKey: ["trades"],
-    queryFn: () => entities.Trade.list("-close_time", 500),
-  });
-
+  const { filteredTrades: trades, tradesLoading: isLoading, startingBalance } = useTradeFilter();
   const stats = useMemo(() => calcStats(trades), [trades]);
 
   const removeWidget = (id) => {
@@ -101,7 +96,7 @@ export default function Dashboard() {
   };
 
   const renderWidgetContent = (id) => {
-    if (id === "equity_curve")       return <EquityCurve trades={trades} />;
+    if (id === "equity_curve")       return <EquityCurve trades={trades} startingBalance={startingBalance} />;
     if (id === "win_loss_chart")     return <WinLossChart trades={trades} />;
     if (id === "session_analysis")   return <SessionAnalysis trades={trades} />;
     if (id === "win_loss_dist")      return <WinLossDistribution trades={trades} />;

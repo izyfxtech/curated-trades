@@ -22,7 +22,7 @@ import { supabase } from '@/api/supabaseClient';
 import { cn } from "@/lib/utils";
 
 const navItems = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/" },
+  { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: BookOpen, label: "Trades", path: "/trades" },
   { icon: BarChart3, label: "Analytics", path: "/analytics" },
   { icon: Calendar, label: "Calendar", path: "/calendar" },
@@ -33,8 +33,8 @@ const navItems = [
 ];
 
 const bottomItems = [
-  { icon: Settings, label: "Settings", path: "/settings" },
-  { icon: Globe, label: "Landing Page", path: "/welcome" },
+  { icon: Settings, label: "Settings", path: "/settings", internal: true },
+  { icon: Globe, label: "Landing Page", path: "/?preview=1", internal: false },
 ];
 
 export default function Sidebar({ collapsed, onToggle, darkMode, onToggleDark }) {
@@ -87,21 +87,32 @@ export default function Sidebar({ collapsed, onToggle, darkMode, onToggleDark })
 
       {/* Bottom */}
       <div className="py-4 px-3 border-t border-sidebar-border space-y-1">
-        {bottomItems.map((item) => (
-          <Link
-            key={item.path}
-            to={item.path}
-            className={cn(
-              "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all",
-              location.pathname === item.path
-                ? "bg-sidebar-accent text-sidebar-foreground"
-                : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent"
-            )}
-          >
-            <item.icon className="w-5 h-5 flex-shrink-0" />
-            {!collapsed && <span>{item.label}</span>}
-          </Link>
-        ))}
+        {bottomItems.map((item) => {
+          const isActive = location.pathname === item.path;
+          const cls = cn(
+            "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all",
+            isActive
+              ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-lg shadow-primary/20"
+              : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent"
+          );
+          return item.internal ? (
+            <Link key={item.path} to={item.path} className={cls}>
+              <item.icon className="w-5 h-5 flex-shrink-0" />
+              {!collapsed && <span>{item.label}</span>}
+            </Link>
+          ) : (
+            <a
+              key={item.path}
+              href={item.path}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={cls}
+            >
+              <item.icon className="w-5 h-5 flex-shrink-0" />
+              {!collapsed && <span>{item.label}</span>}
+            </a>
+          );
+        })}
         <button
           onClick={handleLogout}
           className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-sidebar-foreground/70 hover:text-destructive hover:bg-destructive/10 transition-all w-full"

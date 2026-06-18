@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { entities } from '@/api/entities';
-import { useQuery } from "@tanstack/react-query";
+import { useTradeFilter } from "@/lib/TradeFilterContext";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 import { calcStats, formatCurrency } from "@/lib/tradeUtils";
 import StatCard from "@/components/dashboard/StatCard";
@@ -53,11 +52,7 @@ export default function Analytics() {
   const [isEditing, setIsEditing] = useState(false);
   const [showAddPanel, setShowAddPanel] = useState(false);
 
-  const { data: trades = [], isLoading } = useQuery({
-    queryKey: ["trades"],
-    queryFn: () => entities.Trade.list("-close_time", 500),
-  });
-
+  const { filteredTrades: trades, tradesLoading: isLoading, startingBalance } = useTradeFilter();
   const stats = useMemo(() => calcStats(trades), [trades]);
 
   const removeWidget = (id) => {
@@ -116,8 +111,8 @@ export default function Analytics() {
 
   const renderContent = (id) => {
     if (id === "profit_chart")       return <ProfitChart trades={trades} />;
-    if (id === "balance_chart")      return <BalanceChart trades={trades} />;
-    if (id === "equity_curve")       return <EquityCurve trades={trades} />;
+    if (id === "balance_chart")      return <BalanceChart trades={trades} startingBalance={startingBalance} />;
+    if (id === "equity_curve")       return <EquityCurve trades={trades} startingBalance={startingBalance} />;
     if (id === "risk_symbols_pair")  return (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <RiskStatsPanel trades={trades} />

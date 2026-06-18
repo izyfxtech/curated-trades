@@ -1,6 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { entities } from '@/api/entities';
-import { useQuery } from "@tanstack/react-query";
+import { useTradeFilter } from "@/lib/TradeFilterContext";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 import {
   format, startOfMonth, endOfMonth, eachDayOfInterval,
@@ -48,17 +47,14 @@ export default function ProfitCalendar() {
   const [showAddSidebar, setShowAddSidebar] = useState(false);
   const [belowLayout, saveBelowLayout] = useStoredLayout("ct_cal_below_v2", DEFAULT_BELOW_WIDGETS);
 
-  const { data: trades = [] } = useQuery({
-    queryKey: ["trades"],
-    queryFn: () => entities.Trade.list("-close_time", 500),
-  });
+  const { filteredTrades: trades, startingBalance } = useTradeFilter();
 
   // Month-scoped trades
   const monthTrades = useMemo(() => {
     const start = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
     const end = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0);
     return trades.filter(t => {
-      const d = t.close_time || t.created_date;
+      const d = t.close_time || t.created_at;
       if (!d) return false;
       const date = new Date(d);
       return date >= start && date <= end;
@@ -68,7 +64,7 @@ export default function ProfitCalendar() {
   const dailyData = useMemo(() => {
     const map = {};
     trades.forEach(t => {
-      const d = t.close_time || t.created_date;
+      const d = t.close_time || t.created_at;
       if (!d) return;
       const key = format(new Date(d), "yyyy-MM-dd");
       if (!map[key]) map[key] = { pnl: 0, trades: 0, wins: 0 };
@@ -97,7 +93,7 @@ export default function ProfitCalendar() {
 
     const byDay = {};
     monthTrades.forEach(t => {
-      const key = format(new Date(t.close_time || t.created_date), "yyyy-MM-dd");
+      const key = format(new Date(t.close_time || t.created_at), "yyyy-MM-dd");
       if (!byDay[key]) byDay[key] = { pnl: 0 };
       byDay[key].pnl += t.net_pnl || t.pnl || 0;
     });
@@ -117,7 +113,7 @@ export default function ProfitCalendar() {
     if (!selectedDate) return [];
     const key = format(selectedDate, "yyyy-MM-dd");
     return trades.filter(t => {
-      const d = t.close_time || t.created_date;
+      const d = t.close_time || t.created_at;
       return d && format(new Date(d), "yyyy-MM-dd") === key;
     });
   }, [selectedDate, trades]);
@@ -158,7 +154,7 @@ export default function ProfitCalendar() {
     }
     if (id === "cal_month_stats")    return <CalendarMonthStats trades={trades} currentMonth={currentMonth} />;
     if (id === "top_symbols")        return <CalendarTopSymbols trades={trades} currentMonth={currentMonth} />;
-    if (id === "equity_curve")       return <EquityCurve trades={trades} />;
+    if (id === "equity_curve")       return <EquityCurve trades={trades} startingBalance={startingBalance} />;
     if (id === "profit_chart")       return <ProfitChart trades={trades} />;
     if (id === "win_loss_dist")      return <WinLossDistribution trades={trades} />;
     if (id === "session_analysis")   return <SessionAnalysis trades={trades} />;

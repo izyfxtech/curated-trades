@@ -21,7 +21,7 @@ export default function Login() {
     try {
       const { error: err } = await supabase.auth.signInWithPassword({ email, password });
       if (err) throw err;
-      window.location.href = "/";
+      window.location.href = "/dashboard";
     } catch (err) {
       setError(err.message || "Invalid email or password");
     } finally {
@@ -32,7 +32,7 @@ export default function Login() {
   const handleGoogle = async () => {
     await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/` },
+      options: { redirectTo: `${window.location.origin}/dashboard` },
     });
   };
 

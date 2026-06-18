@@ -7,7 +7,7 @@ export default function CalendarTopSymbols({ trades, currentMonth }) {
     const start = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
     const end = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0);
     const monthTrades = trades.filter(t => {
-      const d = t.close_time || t.created_date;
+      const d = t.close_time || t.created_at;
       if (!d) return false;
       const date = new Date(d);
       return date >= start && date <= end;

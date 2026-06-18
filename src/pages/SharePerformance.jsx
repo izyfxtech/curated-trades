@@ -35,7 +35,7 @@ export default function SharePerformance() {
 
   const { data: sharedViews = [] } = useQuery({
     queryKey: ["sharedViews"],
-    queryFn: () => entities.SharedView.list("-created_date"),
+    queryFn: () => entities.SharedView.list("-created_at"),
   });
 
   const filteredTrades = useMemo(() => {
@@ -46,7 +46,7 @@ export default function SharePerformance() {
     if (timePeriod === "30d") cutoff.setDate(now.getDate() - 30);
     if (timePeriod === "90d") cutoff.setDate(now.getDate() - 90);
     if (timePeriod === "1y") cutoff.setFullYear(now.getFullYear() - 1);
-    return trades.filter(t => new Date(t.close_time || t.created_date) >= cutoff);
+    return trades.filter(t => new Date(t.close_time || t.created_at) >= cutoff);
   }, [trades, timePeriod]);
 
   const stats = useMemo(() => calcStats(filteredTrades), [filteredTrades]);
@@ -58,16 +58,19 @@ export default function SharePerformance() {
       setCreatingLink(false);
       setNewLinkTitle("");
     },
+    onError: (err) => toast({ title: "Failed to create share link", description: err?.message || "Something went wrong.", variant: "destructive" }),
   });
 
   const togglePublicMutation = useMutation({
     mutationFn: ({ id, is_public }) => entities.SharedView.update(id, { is_public }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sharedViews"] }),
+    onError: (err) => toast({ title: "Failed to update link", description: err?.message || "Something went wrong.", variant: "destructive" }),
   });
 
   const deleteLinkMutation = useMutation({
     mutationFn: (id) => entities.SharedView.delete(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sharedViews"] }),
+    onError: (err) => toast({ title: "Failed to delete link", description: err?.message || "Something went wrong.", variant: "destructive" }),
   });
 
   const handleCreateLink = () => {

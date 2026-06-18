@@ -28,7 +28,7 @@ export default function Register() {
       const { error: err } = await supabase.auth.signUp({
         email,
         password,
-        options: { emailRedirectTo: `${window.location.origin}/` },
+        options: { emailRedirectTo: `${window.location.origin}/dashboard` },
       });
       if (err) throw err;
       setSent(true);
@@ -42,7 +42,7 @@ export default function Register() {
   const handleGoogle = async () => {
     await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/` },
+      options: { redirectTo: `${window.location.origin}/dashboard` },
     });
   };
 

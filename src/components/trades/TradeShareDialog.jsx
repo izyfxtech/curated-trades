@@ -18,7 +18,7 @@ export default function TradeShareDialog({ trade, open, onClose }) {
 
   const { data: sharedViews = [] } = useQuery({
     queryKey: ["sharedViews"],
-    queryFn: () => entities.SharedView.list("-created_date"),
+    queryFn: () => entities.SharedView.list("-created_at"),
     enabled: open,
   });
 
@@ -27,16 +27,19 @@ export default function TradeShareDialog({ trade, open, onClose }) {
   const createMutation = useMutation({
     mutationFn: (data) => entities.SharedView.create(data),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sharedViews"] }),
+    onError: (err) => toast({ title: "Failed to create share link", description: err?.message || "Something went wrong.", variant: "destructive" }),
   });
 
   const togglePublicMutation = useMutation({
     mutationFn: ({ id, is_public }) => entities.SharedView.update(id, { is_public }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sharedViews"] }),
+    onError: (err) => toast({ title: "Failed to update link", description: err?.message || "Something went wrong.", variant: "destructive" }),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id) => entities.SharedView.delete(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sharedViews"] }),
+    onError: (err) => toast({ title: "Failed to delete link", description: err?.message || "Something went wrong.", variant: "destructive" }),
   });
 
   const handleCreate = () => {

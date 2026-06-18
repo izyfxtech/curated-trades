@@ -126,7 +126,7 @@ export default function PublicSharedView() {
     if (period === "30d") cutoff.setDate(cutoff.getDate() - 30);
     if (period === "90d") cutoff.setDate(cutoff.getDate() - 90);
     if (period === "1y") cutoff.setFullYear(cutoff.getFullYear() - 1);
-    return trades.filter(t => new Date(t.close_time || t.created_date) >= cutoff);
+    return trades.filter(t => new Date(t.close_time || t.created_at) >= cutoff);
   }, [trades, view]);
 
   const stats = useMemo(() => calcStats(filteredTrades), [filteredTrades]);
