@@ -1,0 +1,45 @@
+{
+  "name": "Strategy",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Strategy name"
+    },
+    "description": {
+      "type": "string",
+      "description": "Strategy description"
+    },
+    "rules": {
+      "type": "string",
+      "description": "Entry/exit rules in rich text"
+    },
+    "instruments": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Instruments this strategy applies to"
+    },
+    "timeframe": {
+      "type": "string",
+      "description": "Primary timeframe"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "testing",
+        "retired"
+      ],
+      "default": "active"
+    },
+    "color": {
+      "type": "string",
+      "description": "Display color for the strategy"
+    }
+  },
+  "required": [
+    "name"
+  ]
+}

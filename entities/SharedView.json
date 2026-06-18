@@ -1,0 +1,56 @@
+{
+  "name": "SharedView",
+  "type": "object",
+  "properties": {
+    "slug": {
+      "type": "string",
+      "description": "Unique public URL slug"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "performance",
+        "trade"
+      ],
+      "description": "What this share link shows"
+    },
+    "title": {
+      "type": "string",
+      "description": "Display title for this shared view"
+    },
+    "trade_id": {
+      "type": "string",
+      "description": "If type=trade, the trade ID"
+    },
+    "is_public": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether anyone with the link can view it"
+    },
+    "time_period": {
+      "type": "string",
+      "description": "For performance views: all/7d/30d/90d/1y"
+    },
+    "show_equity": {
+      "type": "boolean",
+      "default": true
+    },
+    "show_distribution": {
+      "type": "boolean",
+      "default": true
+    },
+    "simplified": {
+      "type": "boolean",
+      "default": false
+    },
+    "views": {
+      "type": "number",
+      "default": 0,
+      "description": "View count"
+    }
+  },
+  "required": [
+    "slug",
+    "type"
+  ]
+}

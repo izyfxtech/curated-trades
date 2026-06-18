@@ -1,0 +1,165 @@
+{
+  "name": "Trade",
+  "type": "object",
+  "properties": {
+    "symbol": {
+      "type": "string",
+      "description": "Trading instrument symbol (e.g. EURUSD, AAPL, BTCUSD)"
+    },
+    "direction": {
+      "type": "string",
+      "enum": [
+        "long",
+        "short"
+      ],
+      "description": "Trade direction"
+    },
+    "entry_price": {
+      "type": "number",
+      "description": "Entry price"
+    },
+    "exit_price": {
+      "type": "number",
+      "description": "Exit price (empty = trade is still open)"
+    },
+    "stop_loss": {
+      "type": "number",
+      "description": "Stop loss price"
+    },
+    "take_profit": {
+      "type": "number",
+      "description": "Take profit price"
+    },
+    "lot_size": {
+      "type": "number",
+      "description": "Position quantity \u2014 lots (forex/metals), shares (stocks), contracts (futures), or units (crypto)"
+    },
+    "pnl": {
+      "type": "number",
+      "description": "Gross profit or loss amount"
+    },
+    "pnl_pips": {
+      "type": "number",
+      "description": "P&L in pips"
+    },
+    "commission": {
+      "type": "number",
+      "description": "Commission/fees paid"
+    },
+    "swap": {
+      "type": "number",
+      "description": "Swap charges"
+    },
+    "net_pnl": {
+      "type": "number",
+      "description": "Net P&L after commissions and swap"
+    },
+    "risk_reward": {
+      "type": "number",
+      "description": "Risk to reward ratio achieved"
+    },
+    "open_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Trade open time"
+    },
+    "close_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Trade close time"
+    },
+    "duration_minutes": {
+      "type": "number",
+      "description": "Trade duration in minutes"
+    },
+    "session": {
+      "type": "string",
+      "enum": [
+        "asian",
+        "london",
+        "new_york",
+        "overlap"
+      ],
+      "description": "Trading session"
+    },
+    "strategy": {
+      "type": "string",
+      "description": "Strategy used"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Custom tags for the trade"
+    },
+    "mistakes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Mistake tags"
+    },
+    "emotion": {
+      "type": "string",
+      "enum": [
+        "confident",
+        "calm",
+        "anxious",
+        "fearful",
+        "greedy",
+        "frustrated",
+        "neutral"
+      ],
+      "description": "Emotional state during trade"
+    },
+    "rating": {
+      "type": "number",
+      "description": "Self-assessment rating 1-5"
+    },
+    "execution_quality": {
+      "type": "number",
+      "description": "Execution quality 1-10"
+    },
+    "setup_quality": {
+      "type": "number",
+      "description": "Setup quality 1-10"
+    },
+    "discipline_score": {
+      "type": "number",
+      "description": "Discipline score 1-10"
+    },
+    "notes": {
+      "type": "string",
+      "description": "Rich-text journal notes"
+    },
+    "screenshots": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Screenshot URLs"
+    },
+    "account": {
+      "type": "string",
+      "description": "Trading account identifier"
+    },
+    "platform": {
+      "type": "string",
+      "description": "Trading platform name"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "win",
+        "loss",
+        "breakeven",
+        "open"
+      ],
+      "description": "Trade outcome \u2014 open = no exit price yet"
+    }
+  },
+  "required": [
+    "symbol"
+  ]
+}

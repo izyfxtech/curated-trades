@@ -1,0 +1,33 @@
+{
+  "name": "Account",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Account name"
+    },
+    "platform": {
+      "type": "string",
+      "description": "Platform name (e.g. MetaTrader, TradingView)"
+    },
+    "broker": {
+      "type": "string",
+      "description": "Broker name"
+    },
+    "starting_balance": {
+      "type": "number",
+      "description": "Starting account balance"
+    },
+    "currency": {
+      "type": "string",
+      "default": "USD"
+    },
+    "is_active": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "required": [
+    "name"
+  ]
+}
