@@ -1,0 +1,1145 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Curated Trades design system — "Studio".
+ *
+ * A journal should feel like one. This replaces the earlier cool-grey /
+ * navy-topbar dashboard look with an editorial one: warm paper surfaces and
+ * ink-black text, a serif (Fraunces) for page and section titles, real
+ * monospace (JetBrains Mono) for every figure, soft rounded panels, and a
+ * persistent left sidebar instead of a top tab bar. There is a matching dark
+ * "ink" theme, toggled from the sidebar and stored in localStorage.
+ *
+ * Colour roles are deliberately narrow: ink is the primary action, cobalt
+ * marks "where you are" (active nav, focus, the equity line), and green / red
+ * are reserved strictly for gain and loss.
+ *
+ * All colours are oklch tokens. Never hardcode colours in components.
+ */
+
+@theme inline {
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+  --radius-3xl: 1.5rem;
+  --radius-4xl: 1.75rem;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-serif: "Fraunces", ui-serif, Georgia, Cambria, "Times New Roman", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --shadow-2xs: 0 0 #0000;
+  --shadow-xs: 0 1px 2px 0 rgb(60 40 10 / 0.05);
+  --shadow-sm: 0 1px 3px 0 rgb(60 40 10 / 0.07);
+  --shadow: 0 2px 6px -1px rgb(60 40 10 / 0.08), 0 1px 3px -1px rgb(60 40 10 / 0.06);
+  --shadow-md: 0 6px 14px -4px rgb(60 40 10 / 0.12), 0 2px 6px -2px rgb(60 40 10 / 0.06);
+  --shadow-lg: 0 16px 32px -8px rgb(60 40 10 / 0.18), 0 4px 10px -4px rgb(60 40 10 / 0.08);
+  --shadow-xl: 0 24px 48px -12px rgb(60 40 10 / 0.24);
+  --shadow-2xl: 0 32px 64px -16px rgb(60 40 10 / 0.3);
+}
+
+/* Light: warm paper + ink. */
+:root {
+  --radius: 0.75rem;
+  --background: oklch(0.962 0.013 86);
+  --foreground: oklch(0.225 0.014 60);
+  --card: oklch(0.987 0.006 86);
+  --card-foreground: oklch(0.225 0.014 60);
+  --popover: oklch(0.99 0.005 86);
+  --popover-foreground: oklch(0.225 0.014 60);
+  --primary: oklch(0.225 0.014 60);
+  --primary-foreground: oklch(0.975 0.01 86);
+  --secondary: oklch(0.94 0.015 86);
+  --secondary-foreground: oklch(0.32 0.014 60);
+  --muted: oklch(0.938 0.015 86);
+  --muted-foreground: oklch(0.5 0.018 65);
+  --accent: oklch(0.922 0.02 86);
+  --accent-foreground: oklch(0.225 0.014 60);
+  --destructive: oklch(0.55 0.19 27);
+  --destructive-foreground: oklch(0.99 0 0);
+  --border: oklch(0.885 0.016 84);
+  --input: oklch(0.84 0.018 84);
+  --ring: oklch(0.52 0.19 262);
+  --chart-1: oklch(0.52 0.19 262);
+  --chart-2: oklch(0.5 0.13 155);
+  --chart-3: oklch(0.55 0.018 65);
+  --chart-4: oklch(0.72 0.14 75);
+  --chart-5: oklch(0.42 0.02 60);
+  /* The left sidebar: one step deeper than the page. */
+  --sidebar: oklch(0.94 0.016 86);
+  --sidebar-foreground: oklch(0.3 0.014 60);
+  --sidebar-primary: oklch(0.52 0.19 262);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.915 0.02 86);
+  --sidebar-accent-foreground: oklch(0.225 0.014 60);
+  --sidebar-border: oklch(0.87 0.018 84);
+  --sidebar-ring: oklch(0.52 0.19 262);
+  color-scheme: light;
+}
+
+/* Dark: warm ink, same roles. Toggled by adding .dark to <html> (see
+   lib/theme.ts; the inline script in __root.tsx applies it before first
+   paint so there is no light flash). */
+.dark {
+  --background: oklch(0.172 0.008 60);
+  --foreground: oklch(0.945 0.012 86);
+  --card: oklch(0.21 0.009 60);
+  --card-foreground: oklch(0.945 0.012 86);
+  --popover: oklch(0.225 0.01 60);
+  --popover-foreground: oklch(0.945 0.012 86);
+  --primary: oklch(0.945 0.012 86);
+  --primary-foreground: oklch(0.2 0.01 60);
+  --secondary: oklch(0.255 0.01 60);
+  --secondary-foreground: oklch(0.88 0.012 86);
+  --muted: oklch(0.25 0.01 60);
+  --muted-foreground: oklch(0.7 0.016 75);
+  --accent: oklch(0.29 0.012 60);
+  --accent-foreground: oklch(0.945 0.012 86);
+  --destructive: oklch(0.68 0.19 25);
+  --destructive-foreground: oklch(0.16 0.01 60);
+  --border: oklch(0.31 0.01 60);
+  --input: oklch(0.36 0.012 60);
+  --ring: oklch(0.72 0.14 262);
+  --chart-1: oklch(0.72 0.14 262);
+  --chart-2: oklch(0.75 0.15 155);
+  --chart-3: oklch(0.66 0.016 75);
+  --chart-4: oklch(0.8 0.13 80);
+  --chart-5: oklch(0.82 0.012 86);
+  --sidebar: oklch(0.145 0.008 60);
+  --sidebar-foreground: oklch(0.82 0.012 86);
+  --sidebar-primary: oklch(0.72 0.14 262);
+  --sidebar-primary-foreground: oklch(0.16 0.01 60);
+  --sidebar-accent: oklch(0.24 0.01 60);
+  --sidebar-accent-foreground: oklch(0.945 0.012 86);
+  --sidebar-border: oklch(0.27 0.01 60);
+  --sidebar-ring: oklch(0.72 0.14 262);
+  color-scheme: dark;
+}
+
+/* Layering scale for anything that portals to <body>: a modal opened from
+ * any page must sit under a dropdown/popover opened from inside it, and
+ * everything must sit under a toast. Every layer reads from this scale. */
+:root {
+  --z-nav: 40;
+  --z-drawer: 50;
+  --z-modal: 60;
+  --z-dropdown: 80;
+  --z-toast: 100;
+  --sidebar-width: 16rem;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: "cv11", "ss03";
+  }
+
+  ::selection {
+    background-color: color-mix(in oklab, var(--color-chart-1) 28%, transparent);
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-serif);
+    font-optical-sizing: auto;
+  }
+}
+
+/* Figures line up in columns; font-mono is the "this is a number" marker
+   used throughout the components. */
+.font-mono,
+.metric-value,
+.trade-table td,
+input[type="number"] {
+  font-variant-numeric: tabular-nums;
+}
+
+.font-mono {
+  letter-spacing: -0.01em;
+}
+
+/* ---------- App shell: sidebar + app bar ---------- */
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  display: none;
+  height: 100vh;
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  flex-direction: column;
+  gap: 1.25rem;
+  overflow-y: auto;
+  border-right: 1px solid var(--color-sidebar-border);
+  background-color: var(--color-sidebar);
+  color: var(--color-sidebar-foreground);
+  padding: 1.25rem 0.9rem 1rem;
+}
+
+@media (min-width: 1024px) {
+  .sidebar {
+    display: flex;
+  }
+}
+
+/* Same markup as .sidebar, shown as a slide-over on small screens. */
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-drawer);
+  background-color: color-mix(in oklab, var(--color-foreground) 40%, transparent);
+  animation: fade-in 0.15s ease-out;
+}
+
+.drawer {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: flex;
+  height: 100%;
+  width: min(85vw, 18rem);
+  flex-direction: column;
+  gap: 1.25rem;
+  overflow-y: auto;
+  border-right: 1px solid var(--color-sidebar-border);
+  background-color: var(--color-sidebar);
+  color: var(--color-sidebar-foreground);
+  padding: 1.25rem 0.9rem 1rem;
+  box-shadow: var(--shadow-xl);
+  animation: slide-in 0.2s ease-out;
+}
+
+@keyframes slide-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.15rem 0.5rem;
+}
+
+/* The mark: a small ink seal with a serif "C". Drawn in CSS so it follows
+   the theme (paper-on-ink in light, ink-on-paper in dark). */
+.brand-mark {
+  position: relative;
+  display: inline-block;
+  height: 1.75rem;
+  width: 1.75rem;
+  flex-shrink: 0;
+  border-radius: 0.55rem;
+  background-color: var(--color-foreground);
+}
+
+.brand-mark::after {
+  content: "C";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-bottom: 0.05rem;
+  color: var(--color-background);
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+  font-style: italic;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.wordmark {
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.wordmark em {
+  font-weight: 400;
+  color: var(--color-muted-foreground);
+}
+
+.nav-group-label {
+  padding: 0 0.6rem 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+}
+
+.nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.nav-link {
+  display: flex;
+  cursor: pointer;
+  align-items: center;
+  gap: 0.65rem;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  padding: 0.45rem 0.6rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: color-mix(in oklab, var(--color-sidebar-foreground) 78%, transparent);
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.nav-link svg {
+  height: 1rem;
+  width: 1rem;
+  flex-shrink: 0;
+  color: var(--color-muted-foreground);
+}
+
+.nav-link:hover {
+  background-color: var(--color-sidebar-accent);
+  color: var(--color-sidebar-accent-foreground);
+}
+
+.nav-link-active {
+  border-color: var(--color-sidebar-border);
+  background-color: var(--color-card);
+  color: var(--color-sidebar-accent-foreground);
+  box-shadow: var(--shadow-xs);
+}
+
+.nav-link-active svg {
+  color: var(--color-sidebar-primary);
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border-top: 1px solid var(--color-sidebar-border);
+  padding-top: 0.9rem;
+}
+
+.avatar {
+  display: flex;
+  height: 2rem;
+  width: 2rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background-color: var(--color-accent);
+  border: 1px solid var(--color-border);
+  color: var(--color-accent-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+/* Sticky bar above the page content: which portfolio/account every page
+   below is showing, live equity, and the global "Log trade" action. */
+.appbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-nav);
+  border-bottom: 1px solid var(--color-border);
+  background-color: color-mix(in oklab, var(--color-background) 86%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.appbar-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin-inline: auto;
+  max-width: 88rem;
+  padding: 0.65rem 1.5rem;
+}
+
+.contextbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.contextbar-label {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+}
+
+/* No display here on purpose: the app bar toggles it with Tailwind's
+   hidden / sm:inline-flex, and un-layered CSS would override those. */
+.equity-chip {
+  align-items: baseline;
+  gap: 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background-color: var(--color-card);
+  padding: 0.25rem 0.8rem;
+  font-size: 0.75rem;
+  color: var(--color-muted-foreground);
+}
+
+.equity-chip strong {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-foreground);
+}
+
+.content-wrap {
+  margin-inline: auto;
+  max-width: 88rem;
+  padding: 1.75rem 1.5rem 4rem;
+}
+
+/* ---------- Typography ---------- */
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+}
+
+.page-title {
+  font-family: var(--font-serif);
+  font-optical-sizing: auto;
+  font-size: 2rem;
+  font-weight: 450;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.panel-title {
+  font-family: var(--font-serif);
+  font-optical-sizing: auto;
+  font-size: 1.05rem;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-secondary-foreground);
+}
+
+.form-hint {
+  margin-top: 0.3rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-muted-foreground);
+}
+
+/* ---------- Surfaces ---------- */
+
+.surface-panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background-color: var(--color-card);
+  padding: 1.25rem;
+  box-shadow: var(--shadow-xs);
+}
+
+.panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  font-family: var(--font-serif);
+  font-optical-sizing: auto;
+  font-size: 1.05rem;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+}
+
+/* Panel with a tinted title bar and a flush body — settings sections,
+   review tables. Content goes in .panel-body (padded) or directly in a
+   table (flush). */
+.panel-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid var(--color-border);
+  background-color: color-mix(in oklab, var(--color-secondary) 60%, transparent);
+  padding: 0.8rem 1.25rem;
+}
+
+.panel-body {
+  padding: 1.25rem;
+}
+
+/* Metric cards are separate, spaced tiles now (they used to be one joined
+   strip of cells); each is a .surface-panel already. */
+.metric-grid {
+  display: grid;
+  gap: 0.9rem;
+  grid-template-columns: repeat(1, minmax(0, 1fr));
+}
+
+@media (min-width: 640px) {
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1280px) {
+  .metric-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.metric-card {
+  padding: 1.1rem 1.25rem 1.2rem;
+}
+
+.metric-icon {
+  display: inline-flex;
+  height: 1.75rem;
+  width: 1.75rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background-color: var(--color-muted);
+  color: var(--color-muted-foreground);
+}
+
+.metric-icon svg {
+  height: 0.9rem;
+  width: 0.9rem;
+}
+
+.metric-value {
+  font-family: var(--font-mono);
+  font-size: 1.65rem;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+  line-height: 1.15;
+}
+
+.change-positive,
+.change-neutral {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.change-positive {
+  background-color: color-mix(in oklab, var(--color-chart-2) 14%, transparent);
+  color: var(--color-chart-2);
+}
+
+.change-neutral {
+  background-color: var(--color-muted);
+  color: var(--color-muted-foreground);
+}
+
+/* ---------- Tabs (pill style) ---------- */
+
+.tab-bar {
+  display: inline-flex;
+  max-width: 100%;
+  gap: 0.2rem;
+  overflow-x: auto;
+  border-radius: 999px;
+  background-color: var(--color-muted);
+  padding: 0.25rem;
+}
+
+.tab {
+  display: inline-flex;
+  cursor: pointer;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 999px;
+  padding: 0.35rem 0.95rem;
+  white-space: nowrap;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-muted-foreground);
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.tab:hover {
+  color: var(--color-foreground);
+}
+
+.tab-active {
+  background-color: var(--color-card);
+  color: var(--color-foreground);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+/* Vertical section list (settings). */
+.section-nav {
+  display: flex;
+  gap: 0.25rem;
+  overflow-x: auto;
+}
+
+@media (min-width: 1024px) {
+  .section-nav {
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+}
+
+.section-nav-item {
+  display: flex;
+  cursor: pointer;
+  align-items: center;
+  gap: 0.6rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  padding: 0.5rem 0.75rem;
+  white-space: nowrap;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-secondary-foreground);
+}
+
+.section-nav-item svg {
+  height: 0.95rem;
+  width: 0.95rem;
+  color: var(--color-muted-foreground);
+}
+
+.section-nav-item:hover {
+  background-color: var(--color-accent);
+}
+
+.section-nav-item-active {
+  border-color: var(--color-border);
+  background-color: var(--color-card);
+  color: var(--color-foreground);
+  font-weight: 600;
+  box-shadow: var(--shadow-xs);
+}
+
+.section-nav-item-active svg {
+  color: var(--color-chart-1);
+}
+
+/* Settings form row: label and hint on the left, control on the right,
+   hairline between rows. */
+.form-row {
+  display: grid;
+  gap: 0.4rem 2rem;
+  border-bottom: 1px solid var(--color-border);
+  padding: 1rem 1.25rem;
+}
+
+.form-row:last-child {
+  border-bottom: 0;
+}
+
+@media (min-width: 768px) {
+  .form-row {
+    grid-template-columns: 14rem minmax(0, 1fr);
+    align-items: start;
+  }
+}
+
+.form-row-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.form-row-hint {
+  margin-top: 0.15rem;
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--color-muted-foreground);
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-top: 1px solid var(--color-border);
+  background-color: color-mix(in oklab, var(--color-secondary) 60%, transparent);
+  padding: 0.8rem 1.25rem;
+}
+
+/* ---------- Equity chart ---------- */
+
+.chart-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.period-switcher {
+  display: inline-flex;
+  gap: 0.15rem;
+  border-radius: 999px;
+  background-color: var(--color-muted);
+  padding: 0.2rem;
+}
+
+.chart-area {
+  display: flex;
+  gap: 0.75rem;
+  flex: 1;
+}
+
+.chart-y-labels {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 11rem;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--color-muted-foreground);
+}
+
+.chart-plot {
+  position: relative;
+  flex: 1;
+}
+
+.chart-grid-lines {
+  position: absolute;
+  inset: 0 0 1.5rem 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.chart-grid-lines span {
+  display: block;
+  height: 0;
+  border-top: 1px dashed var(--color-border);
+}
+
+.equity-svg {
+  position: relative;
+  height: 11rem;
+  width: 100%;
+  color: var(--color-chart-1);
+  overflow: visible;
+}
+
+.chart-line {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chart-node {
+  fill: var(--color-card);
+  stroke: currentColor;
+  stroke-width: 2;
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
+}
+
+.chart-node-clickable {
+  cursor: pointer;
+}
+
+.chart-node-clickable:hover {
+  opacity: 1;
+}
+
+.chart-end {
+  fill: var(--color-chart-1);
+  stroke: var(--color-card);
+  stroke-width: 3;
+}
+
+.chart-end.chart-node-clickable {
+  cursor: pointer;
+}
+
+.chart-x-labels {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--color-muted-foreground);
+}
+
+/* Hover card over an equity-curve point (EquityCurveChart). */
+.equity-tooltip {
+  position: absolute;
+  z-index: 10;
+  min-width: 8rem;
+  pointer-events: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-popover);
+  padding: 0.55rem 0.75rem;
+  box-shadow: var(--shadow-md);
+}
+
+/* ---------- Signal panel ---------- */
+
+.signal-score {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.signal-ring {
+  display: flex;
+  height: 5rem;
+  width: 5rem;
+  flex-shrink: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background:
+    radial-gradient(closest-side, var(--color-card) 80%, transparent 81%),
+    conic-gradient(var(--color-chart-1) 0 72%, var(--color-muted) 72% 100%);
+}
+
+.signal-ring span {
+  font-family: var(--font-mono);
+  font-size: 1.2rem;
+  font-weight: 500;
+}
+
+.signal-ring small {
+  font-size: 0.62rem;
+  color: var(--color-muted-foreground);
+}
+
+.comparison-list {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.comparison-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-background);
+  padding: 0.6rem 0.85rem;
+}
+
+.comparison-dot {
+  display: inline-block;
+  height: 0.5rem;
+  width: 0.5rem;
+  border-radius: 999px;
+}
+
+.dot-positive {
+  background-color: var(--color-chart-2);
+}
+
+.dot-negative {
+  background-color: var(--color-destructive);
+}
+
+/* ---------- Data tables ---------- */
+
+.trade-table-wrap {
+  overflow-x: auto;
+}
+
+.trade-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.trade-table thead th {
+  padding: 0.7rem 1rem;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.trade-table tbody td {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid color-mix(in oklab, var(--color-border) 70%, transparent);
+  white-space: nowrap;
+}
+
+.trade-table tbody tr:first-child td {
+  border-top: 0;
+}
+
+.trade-table tbody tr:hover td {
+  background-color: color-mix(in oklab, var(--color-accent) 60%, transparent);
+}
+
+.trade-table .num {
+  text-align: right;
+}
+
+.instrument-icon {
+  display: inline-flex;
+  height: 2rem;
+  width: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+}
+
+.instrument-forex {
+  background-color: color-mix(in oklab, var(--color-chart-1) 14%, transparent);
+  color: var(--color-chart-1);
+}
+
+.instrument-crypto {
+  background-color: color-mix(in oklab, var(--color-chart-4) 26%, transparent);
+  color: color-mix(in oklab, var(--color-chart-4) 55%, var(--color-foreground));
+}
+
+.direction {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 999px;
+  background-color: var(--color-muted);
+  padding: 0.15rem 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--color-secondary-foreground);
+}
+
+.direction-long {
+  color: var(--color-chart-2);
+}
+
+.direction-short {
+  color: var(--color-destructive);
+}
+
+.tag-curated {
+  background-color: color-mix(in oklab, var(--color-chart-2) 14%, transparent);
+  color: var(--color-chart-2);
+}
+
+.tag-impulse {
+  background-color: color-mix(in oklab, var(--color-chart-4) 26%, transparent);
+  color: color-mix(in oklab, var(--color-chart-4) 45%, var(--color-foreground));
+}
+
+/* ---------- Risk panel ---------- */
+
+.risk-item + .risk-item {
+  margin-top: 1.1rem;
+}
+
+.progress-track {
+  margin-top: 0.5rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background-color: var(--color-muted);
+  overflow: hidden;
+}
+
+.progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background-color: var(--color-chart-2);
+}
+
+.progress-warm {
+  background-color: var(--color-chart-4);
+}
+
+.progress-danger {
+  background-color: var(--color-destructive);
+}
+
+/* ---------- Insight banner ---------- */
+
+.insight-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  border: 1px solid color-mix(in oklab, var(--color-chart-1) 25%, var(--color-border));
+  border-radius: var(--radius-xl);
+  background-color: color-mix(in oklab, var(--color-chart-1) 7%, var(--color-card));
+  padding: 0.95rem 1.15rem;
+}
+
+.insight-icon {
+  display: inline-flex;
+  height: 1.25rem;
+  width: 1.25rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-chart-1);
+}
+
+/* ---------- Segmented control / toast ---------- */
+
+.direction-toggle {
+  display: inline-flex;
+  gap: 0.15rem;
+  border-radius: 999px;
+  background-color: var(--color-muted);
+  padding: 0.2rem;
+}
+
+.direction-toggle > button {
+  height: 1.9rem;
+  border-radius: 999px;
+}
+
+/* Active segment (Button variant="secondary") reads as a raised chip on
+   the track, in both segmented controls. */
+.direction-toggle .bg-secondary,
+.period-switcher .bg-secondary {
+  background-color: var(--color-card);
+  border-color: var(--color-border);
+  box-shadow: var(--shadow-xs);
+}
+
+.period-switcher > button {
+  border-radius: 999px;
+}
+
+.toast-message {
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  z-index: var(--z-toast);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background-color: var(--color-foreground);
+  color: var(--color-background);
+  padding: 0.6rem 1.15rem;
+  font-size: 0.8125rem;
+  box-shadow: var(--shadow-lg);
+  animation: fade-in 0.2s ease-out;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ---------- Landing page ---------- */
+
+.hero-rule {
+  height: 1px;
+  background: linear-gradient(90deg, var(--color-foreground), transparent 70%);
+  opacity: 0.25;
+}
+
+.hero-figure {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2xl);
+  background-color: var(--color-card);
+  box-shadow: var(--shadow-lg);
+}
+
+/* ---------- Shared report print styles ---------- */
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: white;
+  }
+}
