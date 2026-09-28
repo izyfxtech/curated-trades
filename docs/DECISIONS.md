@@ -628,3 +628,51 @@ the OS setting) and `__root.tsx` inlines a tiny script in `<head>` that applies
 the class before React hydrates, so a dark-mode user never sees a light flash.
 `useTheme()` only syncs React state from the DOM after mount, keeping server
 and client markup identical.
+
+<a id="d50"></a>
+### 50. Position size is in lots (calculation v2)
+
+The journal is primarily forex, so size is now entered and stored in
+**lots**, not raw units, for every forex pair and for gold/silver (XAU/XAG).
+`lib/instruments.ts` is the one place that knows what a symbol *is* — parsed
+from the letters in the ticker (broker suffixes like `.m`/`_i` are stripped),
+giving its contract size (100,000 for forex, 100 oz gold, 5,000 oz silver),
+pip size, and base/quote currency:
+
+```
+P&L = price move × lots × contract size × (quote → account currency rate)
+```
+
+The quote → account rate is derived automatically for the common cases — 1
+when the pair is quoted in the account's own currency (EURUSD on a USD
+account), `1 / price` when the account currency is the base (USDJPY, USDCHF).
+Only a genuine cross relative to the account (EURGBP, GBPJPY on a USD account)
+needs a person-supplied rate; the log-trade modal and risk calculator both ask
+for it inline and refuse to compute a preview without it, and `trades.quote_rate`
+stores it so a later edit or partial exit recomputes correctly without asking
+again. Crypto and anything the parser doesn't recognize (indices, single
+stocks) stay sized in plain units, unchanged from before — brokers disagree
+too much on contract size for those to guess safely.
+
+**Why v2, not a silent reinterpretation of v1 data.** Existing trades were
+entered as raw units (an EURUSD trade might read `quantity: 100000`).
+Reinterpreting that number as lots would turn it into a 100,000-lot position,
+so every `trades` row keeps a `calculation_version` (`"v1"` | `"v2"`) and
+`isLegacyUnitQuantity()` in instruments.ts flags a v1 forex/metal row whose
+stored quantity looks like units (≥ 1,000 for forex, ≥ 100 for gold/silver —
+nobody trades that many lots). Those rows keep computing in raw units exactly
+as before, in trade-calc, trade-exits and the analytics that read
+`realized_r_multiple` / `net_pnl` directly. The size and pip-based numbers a
+person actually *sees* still convert: the Journal table, the trade detail
+page, and the edit form via `displaySize()`, so editing an old trade shows it
+in lots and its size and any partial exits convert to lots (and the row
+re-stamps to v2) the moment it's saved again — the one point where "convert on
+touch" was safe to do quietly, because it's the same save that recomputes
+everything else on that row anyway. CSV export always uses `displaySize()`, so
+a re-imported export reads in lots too.
+
+**Where this shows up:** the log-trade modal's size field, quote-rate field,
+and risk preview; the risk calculator (now symbol-driven end to end instead of
+a separate manual pip-size/pip-value mode); `PartialExitsPanel` (fills and the
+"remaining" figure are lots, `unit` prop); the trade detail page's Position
+size row; and the playbook "Convert to trade" quantity field.

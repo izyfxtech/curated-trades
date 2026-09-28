@@ -27,6 +27,13 @@ import { AttachmentsPanel, PendingScreenshotsPicker } from "@/components/journal
 import { PartialExitsPanel } from "@/components/journal/PartialExitsPanel";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { PlaybookWithChecklist } from "@/lib/playbooks.functions";
+import {
+  buildSizingContext,
+  getInstrumentSpec,
+  needsQuoteRate,
+  sizeLabel,
+  type SizingContext,
+} from "@/lib/instruments";
 import { calculateRiskPreview, type Direction, type TradeStatus } from "@/lib/trade-calc";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -41,6 +48,8 @@ export const emptyTradeForm = {
   entryPrice: "",
   exitPrice: "",
   quantity: "",
+  // Account-currency value of 1 unit of the quote currency; only asked for crosses (EURGBP, GBPJPY…).
+  quoteRate: "",
   stopLoss: "",
   takeProfit: "",
   fees: "0",
@@ -54,6 +63,20 @@ export const emptyTradeForm = {
 };
 
 export type TradeForm = typeof emptyTradeForm;
+
+/** Currency-formatted amount in the account's own currency (falls back to "1,234 CODE" for unknown codes). */
+function formatMoney(amount: number, currency: string, fractionDigits = 0): string {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency,
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits,
+    }).format(amount);
+  } catch {
+    return `${amount.toLocaleString(undefined, { maximumFractionDigits: fractionDigits })} ${currency}`;
+  }
+}
 
 const STATUS_OPTIONS: { value: TradeStatus; label: string }[] = [
   { value: "closed", label: "Closed" },
@@ -78,6 +101,7 @@ export function LogTradeModal({
   playbooks,
   pendingScreenshots,
   onPendingScreenshotsChange,
+  isLegacyUnits = false,
   onClose,
   onSubmit,
 }: {
@@ -97,6 +121,8 @@ export function LogTradeModal({
   /** Screenshots staged for a trade that isn't saved yet (new-trade flow only). */
   pendingScreenshots: File[];
   onPendingScreenshotsChange: (files: File[]) => void;
+  /** Editing a pre-lots trade whose partial exits are still stored in raw units (they convert on save). */
+  isLegacyUnits?: boolean;
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -137,13 +163,42 @@ export function LogTradeModal({
   const hasStop = form.stopLoss !== "" && Number.isFinite(stop);
   const hasEntry = form.entryPrice !== "" && Number.isFinite(entry);
 
+  // What the symbol is (lots vs units, contract size, quote currency) drives
+  // the size field, the risk preview and whether a conversion rate is needed.
+  const spec = getInstrumentSpec(form.symbol);
+  const selectedAccount = accounts.find((account) => account.id === form.accountId) ?? accounts[0];
+  const accountCurrency = (selectedAccount?.base_currency ?? "USD").toUpperCase();
+  const askForQuoteRate = form.symbol.trim() !== "" && needsQuoteRate(spec, accountCurrency);
+  const quoteRate = form.quoteRate !== "" ? Number(form.quoteRate) : null;
+  const sizeText = sizeLabel(spec);
+  let sizing: SizingContext | undefined;
+  if (spec.sizeUnit === "lots") {
+    try {
+      sizing = buildSizingContext({ symbol: form.symbol, accountCurrency, quoteRate });
+    } catch {
+      sizing = undefined; // cross pair, rate not entered yet — the field below asks for it
+    }
+  }
+  const sizingReady = spec.sizeUnit !== "lots" || sizing != null;
+
   const preview =
-    hasEntry && hasStop
-      ? calculateRiskPreview({ equity, riskPercent, entryPrice: entry, stopLoss: stop })
+    hasEntry && hasStop && sizingReady
+      ? calculateRiskPreview({
+          equity,
+          riskPercent,
+          entryPrice: entry,
+          stopLoss: stop,
+          ...(sizing ? { sizing } : {}),
+        })
       : null;
 
+  // Risk scales linearly with size, so "what your size risks" is the budget
+  // scaled by your size over the suggested size — no second formula to drift.
   const yourRisk =
-    preview && Number.isFinite(size) && size > 0 ? preview.stopDistance * size : null;
+    preview && preview.suggestedQuantity && Number.isFinite(size) && size > 0
+      ? (preview.riskAmount * size) / preview.suggestedQuantity
+      : null;
+  const suggestedSize = preview ? (preview.suggestedLotsRounded ?? preview.suggestedQuantity) : null;
   const plannedR =
     preview &&
     form.takeProfit !== "" &&
@@ -272,36 +327,42 @@ export function LogTradeModal({
             ) : (
               <div>
                 <label htmlFor="trade-quantity-open" className="field-label">
-                  Position size
+                  {sizeText.noun}
                 </label>
                 <Input
                   id="trade-quantity-open"
                   type="number"
-                  step="any"
+                  step={spec.sizeUnit === "lots" ? "0.01" : "any"}
+                  min="0"
+                  inputMode="decimal"
+                  className="font-mono"
                   value={form.quantity}
                   onChange={(event) => patch({ quantity: event.target.value })}
-                  placeholder="100000"
+                  placeholder={sizeText.placeholder}
                 />
               </div>
             )}
             {form.status === "closed" && (
               <div>
                 <label htmlFor="trade-quantity" className="field-label">
-                  Position size
+                  {sizeText.noun}
                 </label>
                 <Input
                   id="trade-quantity"
                   type="number"
-                  step="any"
+                  step={spec.sizeUnit === "lots" ? "0.01" : "any"}
+                  min="0"
+                  inputMode="decimal"
+                  className="font-mono"
                   value={form.quantity}
                   onChange={(event) => patch({ quantity: event.target.value })}
-                  placeholder="100000"
+                  placeholder={sizeText.placeholder}
                 />
               </div>
             )}
             <div>
               <label htmlFor="trade-fees" className="field-label">
-                Fees (USD)
+                Fees ({accountCurrency})
               </label>
               <Input
                 id="trade-fees"
@@ -339,19 +400,52 @@ export function LogTradeModal({
               />
             </div>
           </div>
+          {askForQuoteRate && (
+            <div>
+              <label htmlFor="trade-quote-rate" className="field-label">
+                {accountCurrency} value of 1 {spec.quote}
+              </label>
+              <Input
+                id="trade-quote-rate"
+                type="number"
+                step="any"
+                min="0"
+                className="font-mono"
+                value={form.quoteRate}
+                onChange={(event) => patch({ quoteRate: event.target.value })}
+                placeholder={spec.quote === "JPY" ? "0.0067" : "1.27"}
+              />
+              <p className="form-hint">
+                {spec.symbol} is priced in {spec.quote}, not {accountCurrency}, so P&amp;L and risk need this rate to be
+                converted. Use the current {spec.quote}/{accountCurrency} rate (for example, what 1 {spec.quote} buys in{" "}
+                {accountCurrency}).
+              </p>
+            </div>
+          )}
           {preview && (
             <div className="rounded-md border border-border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground">
               <Target className="mr-1 inline size-3 text-chart-2" /> Risk preview at {riskPercent}%
               of equity:{" "}
               <span className="font-mono font-semibold text-foreground">
-                ${preview.riskAmount.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                {formatMoney(preview.riskAmount, accountCurrency)}
               </span>{" "}
               risk, suggested size{" "}
               <span className="font-mono font-semibold text-foreground">
-                {preview.suggestedQuantity?.toLocaleString(undefined, {
-                  maximumFractionDigits: 2,
-                }) ?? "—"}
-              </span>
+                {suggestedSize != null
+                  ? suggestedSize.toLocaleString(undefined, {
+                      minimumFractionDigits: spec.sizeUnit === "lots" ? 2 : 0,
+                      maximumFractionDigits: spec.sizeUnit === "lots" ? 2 : 4,
+                    })
+                  : "—"}
+              </span>{" "}
+              {sizeText.unit}
+              {preview.stopPips != null && preview.pipValuePerLot != null && (
+                <span>
+                  {" "}
+                  ({preview.stopPips.toLocaleString(undefined, { maximumFractionDigits: 1 })} pip stop,{" "}
+                  {formatMoney(preview.pipValuePerLot, accountCurrency, 2)}/pip per lot)
+                </span>
+              )}
               {plannedR != null && (
                 <>
                   , planned{" "}
@@ -368,7 +462,7 @@ export function LogTradeModal({
                 <>
                   , your size risks{" "}
                   <span className="font-mono font-semibold text-foreground">
-                    ${yourRisk.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                    {formatMoney(yourRisk, accountCurrency)}
                   </span>
                 </>
               )}
@@ -423,11 +517,20 @@ export function LogTradeModal({
             </div>
           </div>
           {editingTradeId && form.status === "open" && (
-            <PartialExitsPanel
-              tradeId={editingTradeId}
-              portfolioId={portfolioId}
-              totalQuantity={Number(form.quantity) || 0}
-            />
+            <>
+              <PartialExitsPanel
+                tradeId={editingTradeId}
+                portfolioId={portfolioId}
+                totalQuantity={Number(form.quantity) || 0}
+                unit={spec.sizeUnit}
+              />
+              {isLegacyUnits && (
+                <p className="form-hint">
+                  This trade was logged before position size was in lots. Saving it now converts its size and any
+                  partial exits to lots automatically.
+                </p>
+              )}
+            </>
           )}
           {editingTradeId ? (
             <AttachmentsPanel tradeId={editingTradeId} userId={userId} />

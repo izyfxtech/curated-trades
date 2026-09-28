@@ -35,6 +35,7 @@ import {
   setTradeIdeaStatus,
 } from "@/lib/trade-ideas.functions";
 import { createTrade } from "@/lib/trades.functions";
+import { getInstrumentSpec, sizeLabel } from "@/lib/instruments";
 import type { Database } from "@/integrations/supabase/types";
 
 type TradeIdeaRow = Database["public"]["Tables"]["trade_ideas"]["Row"];
@@ -593,15 +594,17 @@ function PlaybooksPage() {
               </p>
               <div>
                 <label htmlFor="convert-quantity" className="field-label">
-                  Quantity
+                  {sizeLabel(getInstrumentSpec(convertingIdea.symbol)).noun}
                 </label>
                 <Input
                   id="convert-quantity"
                   type="number"
-                  step="any"
+                  step={getInstrumentSpec(convertingIdea.symbol).sizeUnit === "lots" ? "0.01" : "any"}
+                  min="0"
                   className="font-mono"
                   value={convertQuantity}
                   onChange={(e) => setConvertQuantity(e.target.value)}
+                  placeholder={sizeLabel(getInstrumentSpec(convertingIdea.symbol)).placeholder}
                   autoFocus
                 />
               </div>

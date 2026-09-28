@@ -13,7 +13,12 @@
 // drifting.
 import Decimal from "decimal.js";
 
-export const CALCULATION_VERSION = "v1" as const;
+import { LOT_STEP, type SizingContext } from "@/lib/instruments";
+
+// v2: forex/metal size is in LOTS (contract size and quote→account conversion
+// applied by `sizing`). v1 trades stored raw units with price-move × quantity
+// math; they keep working because a calculation without `sizing` is exactly v1.
+export const CALCULATION_VERSION = "v2" as const;
 
 export type Direction = "long" | "short";
 export type TradeStatus = "open" | "closed" | "cancelled" | "incomplete";
@@ -50,6 +55,14 @@ export interface TradeCalcInput {
   takeProfit?: number | null;
   /** One row per realized exit. Empty for a fully open trade. */
   exits: ExitInput[];
+  /** Lot sizing for this symbol/account. Omit for unit-sized instruments and v1 trades. */
+  sizing?: SizingContext;
+}
+
+/** Money per 1.0 of `quantity` per 1.0 of price move, at `price`: contract size × quote→account rate (both 1 without sizing). */
+function moneyPerPriceUnit(sizing: SizingContext | undefined, price: Decimal): Decimal {
+  if (!sizing) return new Decimal(1);
+  return new Decimal(sizing.contractSize).times(sizing.rateAt(price.toNumber()));
 }
 
 export interface TradeCalcResult {
@@ -90,7 +103,9 @@ export function calculateTrade(input: TradeCalcInput): TradeCalcResult {
     for (const exit of input.exits) {
       const exitPrice = toDecimal(exit.exitPrice);
       const exitQty = toDecimal(exit.quantity);
-      grossSum = grossSum.plus(exitPrice.minus(entry).times(sign).times(exitQty));
+      grossSum = grossSum.plus(
+        exitPrice.minus(entry).times(sign).times(exitQty).times(moneyPerPriceUnit(input.sizing, exitPrice)),
+      );
       weightedExitSum = weightedExitSum.plus(exitPrice.times(exitQty));
       exitFeesSum = exitFeesSum.plus(exit.fees ?? 0);
     }
@@ -105,7 +120,11 @@ export function calculateTrade(input: TradeCalcInput): TradeCalcResult {
   const totalQuantity = toDecimal(input.quantity);
   const stopDistance = stop != null ? entry.minus(stop).abs() : null;
 
-  const initialRisk = stopDistance != null ? stopDistance.times(totalQuantity) : null;
+  // Risk is what the stop would cost, so convert at the stop price.
+  const initialRisk =
+    stopDistance != null && stop != null
+      ? stopDistance.times(totalQuantity).times(moneyPerPriceUnit(input.sizing, stop))
+      : null;
 
   const plannedRMultiple =
     stopDistance != null && target != null && !stopDistance.isZero()
@@ -153,6 +172,7 @@ export interface ExitPnlInput {
   exitPrice: number;
   quantity: number;
   fees?: number;
+  sizing?: SizingContext;
 }
 
 /** P&L for a single exit fill, independent of the trade's other exits — used to stamp each trade_exits row. */
@@ -161,7 +181,7 @@ export function calculateExitPnl(input: ExitPnlInput): { grossPnl: number; netPn
   const exit = toDecimal(input.exitPrice);
   const quantity = toDecimal(input.quantity);
   const sign = signForDirection(input.direction);
-  const gross = exit.minus(entry).times(sign).times(quantity);
+  const gross = exit.minus(entry).times(sign).times(quantity).times(moneyPerPriceUnit(input.sizing, exit));
   const net = gross.minus(input.fees ?? 0);
   return { grossPnl: gross.toNumber(), netPnl: net.toNumber() };
 }
@@ -175,12 +195,27 @@ export interface RiskPreviewInput {
   riskPercent: number;
   entryPrice: number;
   stopLoss: number;
+  /** Lot sizing for the symbol/account. Omit for unit-sized instruments. */
+  sizing?: SizingContext;
 }
 
 export interface RiskPreviewResult {
   riskAmount: number;
   stopDistance: number;
+  /** Exact (unrounded) size: lots when `sizing` is a lot instrument, otherwise units. */
   suggestedQuantity: number | null;
+  /** Suggested lots rounded DOWN to the lot step, so risk never exceeds the budget; null for unit instruments. */
+  suggestedLotsRounded: number | null;
+  stopPips: number | null;
+  /** Account-currency value of one pip on one lot, at the stop price. */
+  pipValuePerLot: number | null;
+  /** What the rounded lot size actually risks at the stop. */
+  riskAtRoundedSize: number | null;
+}
+
+/** Floors to the lot step (0.01) with a tiny epsilon so 0.3 doesn't floor to 0.29 on float noise. */
+export function floorToLotStep(lots: number): number {
+  return Number((Math.floor(lots / LOT_STEP + 1e-9) * LOT_STEP).toFixed(2));
 }
 
 export function calculateRiskPreview(input: RiskPreviewInput): RiskPreviewResult {
@@ -190,12 +225,26 @@ export function calculateRiskPreview(input: RiskPreviewInput): RiskPreviewResult
   const stop = toDecimal(input.stopLoss);
   const riskAmount = equity.times(riskPercent).dividedBy(100);
   const stopDistance = entry.minus(stop).abs();
-  const suggestedQuantity = stopDistance.isZero() ? null : riskAmount.dividedBy(stopDistance);
+
+  // Risk per 1.0 of size at the stop: distance × contract size × rate. For
+  // unit-sized instruments this is just the distance, as before.
+  const riskPerUnitSize = stopDistance.times(moneyPerPriceUnit(input.sizing, stop));
+  const suggestedQuantity = riskPerUnitSize.isZero() ? null : riskAmount.dividedBy(riskPerUnitSize);
+
+  const isLots = input.sizing?.spec.sizeUnit === "lots";
+  const rounded = isLots && suggestedQuantity ? floorToLotStep(suggestedQuantity.toNumber()) : null;
+  const pipSize = input.sizing?.spec.pipSize ?? null;
 
   return {
     riskAmount: riskAmount.toNumber(),
     stopDistance: stopDistance.toNumber(),
     suggestedQuantity: suggestedQuantity?.toNumber() ?? null,
+    suggestedLotsRounded: rounded,
+    stopPips: pipSize ? stopDistance.dividedBy(pipSize).toNumber() : null,
+    pipValuePerLot: pipSize
+      ? new Decimal(pipSize).times(moneyPerPriceUnit(input.sizing, stop)).toNumber()
+      : null,
+    riskAtRoundedSize: rounded != null ? riskPerUnitSize.times(rounded).toNumber() : null,
   };
 }
 

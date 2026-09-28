@@ -46,7 +46,10 @@ export const importTrades = createServerFn({ method: "POST" })
     // silently row by row inside the loop below (RLS still blocks every
     // insert, but only after paying for up to 2000 wasted round trips). One
     // check up front is worth it here specifically.
-    await assertOwnsAccountsInPortfolio(supabase, userId, data.portfolioId, [data.accountId]);
+    const currencies = await assertOwnsAccountsInPortfolio(supabase, userId, data.portfolioId, [
+      data.accountId,
+    ]);
+    const accountCurrency = currencies.get(data.accountId) ?? "USD";
 
     const { data: batch, error: batchError } = await supabase
       .from("import_batches")
@@ -72,27 +75,30 @@ export const importTrades = createServerFn({ method: "POST" })
 
       try {
         const payload = {
-          ...buildTradePayload({
-            portfolioId: data.portfolioId,
-            accountId: data.accountId,
-            symbol: row.symbol,
-            direction: row.direction,
-            status: row.status,
-            openedAt: row.openedAt,
-            closedAt: row.closedAt,
-            entryPrice: row.entryPrice,
-            exitPrice: row.exitPrice,
-            quantity: row.quantity,
-            stopLoss: row.stopLoss,
-            takeProfit: row.takeProfit,
-            fees: row.fees,
-            spreadCost: 0,
-            swapFunding: 0,
-            isPlanned: row.isPlanned,
-            disciplineScore: null,
-            notes: row.notes,
-            tagIds: [],
-          }),
+          ...buildTradePayload(
+            {
+              portfolioId: data.portfolioId,
+              accountId: data.accountId,
+              symbol: row.symbol,
+              direction: row.direction,
+              status: row.status,
+              openedAt: row.openedAt,
+              closedAt: row.closedAt,
+              entryPrice: row.entryPrice,
+              exitPrice: row.exitPrice,
+              quantity: row.quantity,
+              stopLoss: row.stopLoss,
+              takeProfit: row.takeProfit,
+              fees: row.fees,
+              spreadCost: 0,
+              swapFunding: 0,
+              isPlanned: row.isPlanned,
+              disciplineScore: null,
+              notes: row.notes,
+              tagIds: [],
+            },
+            accountCurrency,
+          ),
           owner_id: userId,
           source: "import",
           import_batch_id: batch.id,

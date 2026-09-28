@@ -19,6 +19,7 @@ import { calculateHoldingSeconds, detectSessionFallback } from "@/lib/trade-calc
 import { formatDuration, formatTradeDate } from "@/components/journal/dashboard-widgets";
 import { PartialExitsPanel } from "@/components/journal/PartialExitsPanel";
 import { AttachmentsPanel } from "@/components/journal/AttachmentsPanel";
+import { displaySize, formatSize } from "@/lib/instruments";
 import { TradeReviewModal } from "@/components/reviews/TradeReviewModal";
 
 export const Route = createFileRoute("/app/journal/$tradeId")({
@@ -39,9 +40,19 @@ interface PlaybookSnapshot {
   checklist: PlaybookChecklistSnapshotItem[];
 }
 
-function money(value: number): string {
+function money(value: number, currency: string): string {
   const sign = value >= 0 ? "+" : "−";
-  return `${sign}$${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  const formatted = Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  try {
+    // Intl gives "$1,234" / "€1,234"; we only want the symbol/code, so pull it
+    // via formatToParts rather than reformatting the (already-rounded) amount.
+    const symbolPart = new Intl.NumberFormat(undefined, { style: "currency", currency })
+      .formatToParts(0)
+      .find((part) => part.type === "currency")?.value;
+    return `${sign}${symbolPart ?? currency + " "}${formatted}`;
+  } catch {
+    return `${sign}${formatted} ${currency}`;
+  }
 }
 
 function TradeDetailPage() {
@@ -90,6 +101,8 @@ function TradeDetailPage() {
     );
   }
 
+  const accountCurrency = (workspace.accounts.find((account) => account.id === trade.account_id)?.base_currency ?? "USD").toUpperCase();
+  const size = displaySize(trade);
   const isLong = trade.direction === "long";
   const isCurated = trade.curated_label === "curated";
   const netPnl = trade.net_pnl ?? 0;
@@ -148,7 +161,7 @@ function TradeDetailPage() {
         <div className="metric-card">
           <p className="eyebrow mb-2">Net P&amp;L</p>
           <p className={`metric-value ${netPnl >= 0 ? "text-chart-2" : "text-destructive"}`}>
-            {trade.status === "closed" ? money(netPnl) : "—"}
+            {trade.status === "closed" ? money(netPnl, accountCurrency) : "—"}
           </p>
         </div>
         <div className="metric-card">
@@ -182,7 +195,7 @@ function TradeDetailPage() {
             </div>
             <div className="flex justify-between">
               <dt className="text-muted-foreground">Position size</dt>
-              <dd className="font-mono">{trade.quantity.toLocaleString()}</dd>
+              <dd className="font-mono">{formatSize(size)}</dd>
             </div>
             <div className="flex justify-between">
               <dt className="text-muted-foreground">Stop loss</dt>
@@ -293,7 +306,7 @@ function TradeDetailPage() {
 
       <section className="surface-panel mt-6">
         <p className="panel-title mb-4">Partial exits</p>
-        <PartialExitsPanel tradeId={tradeId} portfolioId={trade.portfolio_id} totalQuantity={trade.quantity} />
+        <PartialExitsPanel tradeId={tradeId} portfolioId={trade.portfolio_id} totalQuantity={size.value} unit={size.unit} />
       </section>
 
       <section className="surface-panel mt-6">

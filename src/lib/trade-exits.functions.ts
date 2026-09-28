@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import type { Database } from "@/integrations/supabase/types";
+import { buildSizingContext, type SizingContext } from "@/lib/instruments";
 import {
   CALCULATION_VERSION,
   calculateExitPnl,
@@ -42,6 +43,29 @@ async function loadOwnedTrade(
   return data;
 }
 
+/**
+ * Lot sizing for a stored trade, or undefined for a pre-lots (v1) trade —
+ * whose quantities are raw units and must keep being computed that way, or
+ * every stored fill would silently change meaning.
+ */
+async function sizingForTrade(
+  supabase: SupabaseClient<Database>,
+  trade: TradeRow,
+): Promise<SizingContext | undefined> {
+  if (trade.calculation_version === "v1") return undefined;
+  const { data: account, error } = await supabase
+    .from("accounts")
+    .select("base_currency")
+    .eq("id", trade.account_id)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return buildSizingContext({
+    symbol: trade.symbol,
+    accountCurrency: account?.base_currency ?? "USD",
+    quoteRate: trade.quote_rate ?? null,
+  });
+}
+
 /** Recomputes and persists the parent trade's aggregate fields from its full set of exits. */
 async function recomputeTradeFromExits(
   supabase: SupabaseClient<Database>,
@@ -61,10 +85,13 @@ async function recomputeTradeFromExits(
     fees: exit.fees,
   }));
   const filledQuantity = exitInputs.reduce((sum, exit) => sum + exit.quantity, 0);
-  const isFullyFilled = exitList.length > 0 && filledQuantity >= trade.quantity;
+  // Epsilon: lot fills like 0.1 + 0.1 + 0.1 don't sum to exactly 0.3 in floats.
+  const isFullyFilled = exitList.length > 0 && filledQuantity + 1e-9 >= trade.quantity;
   const latestExit = exitList.length > 0 ? exitList[exitList.length - 1] : undefined;
 
+  const sizing = await sizingForTrade(supabase, trade);
   const calc = calculateTrade({
+    ...(sizing ? { sizing } : {}),
     direction: asDirection(trade.direction),
     entryPrice: trade.entry_price,
     quantity: trade.quantity,
@@ -94,7 +121,8 @@ async function recomputeTradeFromExits(
     status: nextStatus,
     closed_at: closedAt,
     holding_seconds: closedAt ? calculateHoldingSeconds(trade.opened_at, closedAt) : null,
-    calculation_version: CALCULATION_VERSION,
+    // A v1 trade stays v1 (its quantities are units); only v2 trades re-stamp.
+    calculation_version: trade.calculation_version === "v1" ? "v1" : CALCULATION_VERSION,
   };
 
   const { data: updated, error: updateError } = await supabase
@@ -137,7 +165,9 @@ export const addTradeExit = createServerFn({ method: "POST" })
     const { supabase, userId } = context;
     const trade = await loadOwnedTrade(supabase, userId, data.tradeId);
 
+    const sizing = await sizingForTrade(supabase, trade);
     const exitPnl = calculateExitPnl({
+      ...(sizing ? { sizing } : {}),
       direction: asDirection(trade.direction),
       entryPrice: trade.entry_price,
       exitPrice: data.exitPrice,

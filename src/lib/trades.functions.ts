@@ -10,6 +10,12 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { friendlyNotFoundError } from "@/lib/db-errors";
 import type { Database, Json } from "@/integrations/supabase/types";
 import {
+  buildSizingContext,
+  getInstrumentSpec,
+  isLegacyUnitQuantity,
+  needsQuoteRate,
+} from "@/lib/instruments";
+import {
   CALCULATION_VERSION,
   calculateHoldingSeconds,
   calculateTrade,
@@ -34,7 +40,11 @@ const tradeFieldsSchema = z.object({
   closedAt: z.string().datetime().nullable().optional(),
   entryPrice: z.number().positive(),
   exitPrice: z.number().positive().nullable().optional(),
+  // Lots for forex/metals (1.00 = one standard lot), plain units for crypto and anything else.
   quantity: z.number().positive(),
+  // Account-currency value of 1 unit of the pair's quote currency. Only needed
+  // for crosses (EURGBP, GBPJPY…); see instruments.needsQuoteRate.
+  quoteRate: z.number().positive().nullable().optional(),
   stopLoss: z.number().positive().nullable().optional(),
   takeProfit: z.number().positive().nullable().optional(),
   fees: z.number().min(0).default(0),
@@ -81,7 +91,13 @@ type TradeFields = z.infer<typeof tradeFieldsSchema>;
 export type TradeInput = z.input<typeof tradeFieldsSchema>;
 
 /** Shared derivation logic between create, update, and import — builds everything except owner/portfolio linkage. */
-export function buildTradePayload(data: TradeFields): Database["public"]["Tables"]["trades"]["Insert"] {
+export function buildTradePayload(
+  data: TradeFields,
+  accountCurrency: string,
+): Database["public"]["Tables"]["trades"]["Insert"] {
+  // Throws a readable error for a cross pair with no rate — surfaced in the UI.
+  const sizing = buildSizingContext({ symbol: data.symbol, accountCurrency, quoteRate: data.quoteRate });
+  const storesQuoteRate = needsQuoteRate(sizing.spec, sizing.accountCurrency);
   const isClosed = data.status === "closed";
   const exits: ExitInput[] =
     isClosed && data.exitPrice != null
@@ -98,6 +114,7 @@ export function buildTradePayload(data: TradeFields): Database["public"]["Tables
     stopLoss: data.stopLoss ?? null,
     takeProfit: data.takeProfit ?? null,
     exits,
+    sizing,
   });
 
   const holdingSeconds =
@@ -119,6 +136,9 @@ export function buildTradePayload(data: TradeFields): Database["public"]["Tables
     entry_price: data.entryPrice,
     exit_price: isClosed ? (data.exitPrice ?? null) : null,
     quantity: data.quantity,
+    // Only written for crosses, so nothing extra is sent (or required of the
+    // schema) for the common case.
+    ...(storesQuoteRate ? { quote_rate: data.quoteRate ?? null } : {}),
     stop_loss: data.stopLoss ?? null,
     take_profit: data.takeProfit ?? null,
     fees: data.fees,
@@ -159,16 +179,20 @@ async function assertOwnsPortfolio(
   if (!owned) throw new Error("Portfolio not found");
 }
 
-/** Confirms every accountId belongs to the caller AND to the given portfolio — a trade group can't silently span portfolios. */
+/**
+ * Confirms every accountId belongs to the caller AND to the given portfolio —
+ * a trade group can't silently span portfolios. Returns each account's base
+ * currency (id → ISO code), which lot sizing needs to convert P&L and risk.
+ */
 async function assertOwnsAccountsInPortfolio(
   supabase: SupabaseClient<Database>,
   userId: string,
   portfolioId: string,
   accountIds: string[],
-) {
+): Promise<Map<string, string>> {
   const { data: owned, error } = await supabase
     .from("accounts")
-    .select("id")
+    .select("id, base_currency")
     .eq("owner_id", userId)
     .eq("portfolio_id", portfolioId)
     .in("id", accountIds);
@@ -177,6 +201,7 @@ async function assertOwnsAccountsInPortfolio(
   if (accountIds.some((id) => !ownedIds.has(id))) {
     throw new Error("One or more accounts weren't found in this portfolio");
   }
+  return new Map((owned ?? []).map((row) => [row.id, row.base_currency]));
 }
 
 /** Replaces a trade's tag links wholesale — delete-then-insert is fine at this scale (max 20 tags/trade). */
@@ -322,11 +347,11 @@ export const createTrade = createServerFn({ method: "POST" })
     // rows means a partial failure partway through would leave an orphaned
     // half-group — cheaper to confirm every account up front than to clean
     // up a partial insert after the fact.
-    await assertOwnsAccountsInPortfolio(supabase, userId, data.portfolioId, data.accountIds);
+    const currencies = await assertOwnsAccountsInPortfolio(supabase, userId, data.portfolioId, data.accountIds);
 
     const tradeGroupId = crypto.randomUUID();
     const payloads = data.accountIds.map((accountId) => ({
-      ...buildTradePayload({ ...data, accountId }),
+      ...buildTradePayload({ ...data, accountId }, currencies.get(accountId) ?? "USD"),
       owner_id: userId,
       trade_group_id: tradeGroupId,
     }));
@@ -343,14 +368,34 @@ export const updateTrade = createServerFn({ method: "POST" })
   .validator(updateTradeSchema)
   .handler(async ({ context, data }): Promise<TradeRow> => {
     const { supabase, userId } = context;
-    const payload = { ...buildTradePayload(data), owner_id: userId };
 
-    // Collapsed from three sequential round trips (assert portfolio owned,
-    // select the trade to confirm it exists, then update) to one. The
-    // .eq("owner_id", ...) filter means a wrong/foreign tradeId matches zero
-    // rows (PGRST116 from .single()); if the payload's portfolioId isn't the
-    // caller's, RLS's WITH CHECK rejects the write (42501). Either way we
-    // land on the same "Trade not found" message as before.
+    // Lot sizing converts P&L into the account's currency, so the account has
+    // to be known (and owned) before the numbers can be derived. This also
+    // replaces the old reliance on RLS alone for a foreign accountId.
+    const currencies = await assertOwnsAccountsInPortfolio(supabase, userId, data.portfolioId, [data.accountId]);
+    const payload = { ...buildTradePayload(data, currencies.get(data.accountId) ?? "USD"), owner_id: userId };
+
+    // Before overwriting, note whether this is a pre-lots (v1) trade that was
+    // stored in raw units: its partial-exit rows are in units too, and once the
+    // trade is re-saved in lots they must follow or fills would never add up.
+    const { data: existing, error: existingError } = await supabase
+      .from("trades")
+      .select("symbol, quantity, calculation_version")
+      .eq("id", data.tradeId)
+      .eq("owner_id", userId)
+      .maybeSingle();
+    if (existingError) throw new Error(existingError.message);
+    if (!existing) throw new Error("Trade not found");
+    const wasLegacyUnits = isLegacyUnitQuantity({
+      symbol: existing.symbol,
+      quantity: existing.quantity,
+      calculationVersion: existing.calculation_version,
+    });
+
+    // The .eq("owner_id", ...) filter means a wrong/foreign tradeId matches
+    // zero rows (PGRST116 from .single()); if the payload's portfolioId isn't
+    // the caller's, RLS's WITH CHECK rejects the write (42501). Either way we
+    // land on the same "Trade not found" message.
     const { data: updated, error } = await supabase
       .from("trades")
       .update(payload)
@@ -359,6 +404,24 @@ export const updateTrade = createServerFn({ method: "POST" })
       .select("*")
       .single();
     if (error) throw friendlyNotFoundError(error, "Trade not found");
+
+    if (wasLegacyUnits) {
+      const contractSize = getInstrumentSpec(existing.symbol).contractSize;
+      const { data: legacyExits, error: legacyExitsError } = await supabase
+        .from("trade_exits")
+        .select("id, quantity")
+        .eq("trade_id", data.tradeId)
+        .eq("owner_id", userId);
+      if (legacyExitsError) throw new Error(legacyExitsError.message);
+      for (const exit of legacyExits ?? []) {
+        const { error: exitError } = await supabase
+          .from("trade_exits")
+          .update({ quantity: exit.quantity / contractSize })
+          .eq("id", exit.id)
+          .eq("owner_id", userId);
+        if (exitError) throw new Error(exitError.message);
+      }
+    }
 
     await syncTradeTags(supabase, userId, data.tradeId, data.tagIds);
     return updated;

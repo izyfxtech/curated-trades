@@ -1034,6 +1034,7 @@ export type Database = {
           playbook_snapshot: Json | null
           portfolio_id: string
           quantity: number
+          quote_rate: number | null
           realized_r_multiple: number | null
           session: string | null
           source: string
@@ -1077,6 +1078,7 @@ export type Database = {
           playbook_snapshot?: Json | null
           portfolio_id: string
           quantity: number
+          quote_rate?: number | null
           realized_r_multiple?: number | null
           session?: string | null
           source?: string
@@ -1120,6 +1122,7 @@ export type Database = {
           playbook_snapshot?: Json | null
           portfolio_id?: string
           quantity?: number
+          quote_rate?: number | null
           realized_r_multiple?: number | null
           session?: string | null
           source?: string

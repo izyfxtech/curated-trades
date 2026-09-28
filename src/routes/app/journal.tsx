@@ -29,6 +29,7 @@ import { listAttachmentsForPortfolio, listAttachmentTradeIds } from "@/lib/attac
 import { listPlaybooks } from "@/lib/playbooks.functions";
 import { emptyTradeForm, LogTradeModal, type TradeForm } from "@/components/journal/LogTradeModal";
 import { uploadTradeScreenshot } from "@/components/journal/AttachmentsPanel";
+import { displaySize, isLegacyUnitQuantity } from "@/lib/instruments";
 import { CsvImportModal } from "@/components/journal/CsvImportModal";
 import { TradeGallery } from "@/components/journal/TradeGallery";
 import { TradeRow } from "@/components/journal/dashboard-widgets";
@@ -156,6 +157,7 @@ function JournalListPage() {
   const [isLogOpen, setIsLogOpen] = useState(false);
   // Screenshots picked in the "Log a trade" form before the trade exists; uploaded once it is saved.
   const [pendingScreenshots, setPendingScreenshots] = useState<File[]>([]);
+  const [editingIsLegacyUnits, setEditingIsLegacyUnits] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [editingTrade, setEditingTrade] = useState<TradeRowData | null>(null);
   const [notice, setNotice] = useState("");
@@ -267,6 +269,7 @@ function JournalListPage() {
   function openNewTrade() {
     setEditingTrade(null);
     setPendingScreenshots([]);
+    setEditingIsLegacyUnits(false);
     setForm({ ...emptyTradeForm, accountId: workspace?.activeAccount?.id ?? workspace?.accounts[0]?.id ?? null });
     setIsLogOpen(true);
   }
@@ -322,7 +325,9 @@ function JournalListPage() {
           : "closed",
       entryPrice: String(trade.entry_price),
       exitPrice: trade.exit_price == null ? "" : String(trade.exit_price),
-      quantity: String(trade.quantity),
+      // Show lots (converting pre-lots "units" rows) so the edit form matches the new size field.
+      quantity: String(displaySize(trade).value),
+      quoteRate: trade.quote_rate != null ? String(trade.quote_rate) : "",
       stopLoss: trade.stop_loss == null ? "" : String(trade.stop_loss),
       takeProfit: trade.take_profit == null ? "" : String(trade.take_profit),
       fees: String(trade.fees),
@@ -337,6 +342,9 @@ function JournalListPage() {
           : {},
       tagIds: (tagsByTradeId.get(trade.id) ?? []).map((tag) => tag.id),
     });
+    setEditingIsLegacyUnits(
+      isLegacyUnitQuantity({ symbol: trade.symbol, quantity: trade.quantity, calculationVersion: trade.calculation_version }),
+    );
     setIsLogOpen(true);
   }
 
@@ -403,6 +411,7 @@ function JournalListPage() {
       entryPrice: entry,
       exitPrice: exit,
       quantity: size,
+      quoteRate: form.quoteRate !== "" && Number.isFinite(Number(form.quoteRate)) ? Number(form.quoteRate) : null,
       stopLoss: stop,
       takeProfit: target,
       fees,
@@ -427,11 +436,11 @@ function JournalListPage() {
   function exportCsv() {
     const header = [
       "symbol", "market", "direction", "status", "opened_at", "closed_at", "entry_price", "exit_price",
-      "quantity", "stop_loss", "take_profit", "fees", "net_pnl", "r_multiple", "curated_label", "session", "notes",
+      "quantity", "size_unit", "stop_loss", "take_profit", "fees", "net_pnl", "r_multiple", "curated_label", "session", "notes",
     ];
     const rows = filteredTrades.map((trade) => [
       trade.symbol, trade.market, trade.direction, trade.status, trade.opened_at, trade.closed_at ?? "",
-      trade.entry_price, trade.exit_price ?? "", trade.quantity, trade.stop_loss ?? "", trade.take_profit ?? "",
+      trade.entry_price, trade.exit_price ?? "", displaySize(trade).value, displaySize(trade).unit, trade.stop_loss ?? "", trade.take_profit ?? "",
       trade.fees, trade.net_pnl ?? "", trade.realized_r_multiple ?? trade.planned_r_multiple ?? "",
       trade.curated_label, trade.session ?? "", (trade.notes ?? "").replaceAll('"', '""'),
     ]);
@@ -631,10 +640,12 @@ function JournalListPage() {
           playbooks={activePlaybooks}
           pendingScreenshots={pendingScreenshots}
           onPendingScreenshotsChange={setPendingScreenshots}
+          isLegacyUnits={editingIsLegacyUnits}
           onClose={() => {
             setIsLogOpen(false);
             setEditingTrade(null);
             setPendingScreenshots([]);
+            setEditingIsLegacyUnits(false);
           }}
           onSubmit={submitTrade}
         />

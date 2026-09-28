@@ -14,10 +14,13 @@ export function PartialExitsPanel({
   tradeId,
   portfolioId,
   totalQuantity,
+  unit = "units",
 }: {
   tradeId: string;
   portfolioId: string;
   totalQuantity: number;
+  /** "lots" for forex/metal trades (calculation v2); "units" for crypto and pre-lots trades. */
+  unit?: "lots" | "units";
 }) {
   const queryClient = useQueryClient();
   const exitsQuery = useQuery({
@@ -25,8 +28,14 @@ export function PartialExitsPanel({
     queryFn: () => listTradeExits({ data: { tradeId } }),
   });
   const exits = exitsQuery.data ?? [];
-  const filled = exits.reduce((sum, exit) => sum + exit.quantity, 0);
-  const remaining = Math.max(0, totalQuantity - filled);
+  // Rounded so 0.1 + 0.2 style float noise never leaves "0.30000000000000004 lots" on screen.
+  const round = (value: number) => Number(value.toFixed(8));
+  const filled = round(exits.reduce((sum, exit) => sum + exit.quantity, 0));
+  const remaining = Math.max(0, round(totalQuantity - filled));
+  const fmt = (value: number) =>
+    unit === "lots"
+      ? value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 3 })
+      : value.toLocaleString(undefined, { maximumFractionDigits: 8 });
 
   const [exitPrice, setExitPrice] = useState("");
   const [quantity, setQuantity] = useState("");
@@ -74,7 +83,7 @@ export function PartialExitsPanel({
       <div className="mb-2 flex items-center justify-between">
         <span className="field-label mb-0">Partial exits</span>
         <span className="font-mono text-xs text-muted-foreground">
-          {filled.toLocaleString()} / {totalQuantity.toLocaleString()} filled
+          {fmt(filled)} / {fmt(totalQuantity)} {unit} filled
         </span>
       </div>
 
@@ -84,7 +93,7 @@ export function PartialExitsPanel({
             <li key={exit.id} className="flex items-center justify-between text-xs">
               <span className="text-muted-foreground">
                 <span className="font-mono">
-                  {exit.quantity.toLocaleString()} @ {exit.exit_price}
+                  {fmt(exit.quantity)} {unit} @ {exit.exit_price}
                 </span>, {new Date(exit.exited_at).toLocaleDateString("en-US", { month: "short", day: "2-digit" })}
               </span>
               <span className="flex items-center gap-2">
@@ -123,8 +132,8 @@ export function PartialExitsPanel({
           />
           <Input
             type="number"
-            step="any"
-            placeholder={`Qty (≤ ${remaining})`}
+            step={unit === "lots" ? "0.01" : "any"}
+            placeholder={`${unit === "lots" ? "Lots" : "Qty"} (≤ ${fmt(remaining)})`}
             value={quantity}
             onChange={(event) => setQuantity(event.target.value)}
           />
