@@ -1,6 +1,7 @@
 // The root route every other route renders inside of: HTML document shell,
 // global stylesheet link, QueryClientProvider (one shared TanStack Query
-// cache for the whole app — see router.tsx for its default options), and the
+// cache for the whole app — see router.tsx for its default options), theme
+// and toast providers, and the
 // fallback UI for unmatched URLs and uncaught render errors. Every page's
 // content renders through the <Outlet /> further down this file.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -12,13 +13,13 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
+import { ThemeProvider } from "next-themes";
 import { type ReactNode } from "react";
 
-import { AuthProvider } from "@/lib/auth/session-context";
+import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 import appCss from "../styles.css?url";
-import { THEME_INIT_SCRIPT } from "@/lib/theme";
 
 function NotFoundComponent() {
   return (
@@ -107,8 +108,6 @@ function RootShell({ children }: { children: ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        {/* Applies the saved/OS theme before first paint — see lib/theme.ts. */}
-        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         <HeadContent />
       </head>
       <body>
@@ -124,15 +123,17 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Single app-wide auth check — see session-context.tsx. Every route
-          that needs to know "signed in or not" reads it via useAuth()
-          instead of running its own supabase.auth.getSession() effect. */}
-      <AuthProvider>
+      {/* next-themes owns the light/dark class on <html>, including the
+          pre-paint script that prevents a flash. It keeps the same
+          "ct-theme" localStorage key the app used before, so an existing
+          saved choice carries over. */}
+      <ThemeProvider attribute="class" defaultTheme="system" storageKey="ct-theme" disableTransitionOnChange>
         <TooltipProvider delayDuration={200}>
           {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
           <Outlet />
+          <Toaster />
         </TooltipProvider>
-      </AuthProvider>
+      </ThemeProvider>
     </QueryClientProvider>
   );
 }

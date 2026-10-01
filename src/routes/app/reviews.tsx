@@ -6,27 +6,33 @@
 // net P&L, top setups, emotional patterns, mistakes, strongest decisions)
 // is derived live from trades + trade_reviews + tags in periodStats below,
 // not stored separately, so there's exactly one source of truth for them.
-import { createFileRoute } from "@tanstack/react-router";
+//
+// The active tab, the period being viewed (?offset=-1 is last week/month) and
+// the trade open in the review modal (?review=<id>) are URL search params, so
+// the view survives refresh and is linkable; the commitment box is a small
+// TanStack Form.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { createFileRoute } from "@tanstack/react-router";
 import { CheckCircle2, ChevronLeft, ChevronRight, ClipboardList, Sparkles } from "lucide-react";
+import { z } from "zod";
 
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { VoiceTextarea } from "@/components/journal/VoiceTextarea";
 import { TradeReviewModal } from "@/components/reviews/TradeReviewModal";
-import { getWorkspace } from "@/lib/portfolios.functions";
-import { listTrades, listTradeTagLinks, TRADES_LIST_DEFAULT_LIMIT } from "@/lib/trades.functions";
-import { listTags } from "@/lib/tags.functions";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { formProps, useAppForm } from "@/lib/form";
+import { currencyByAccountId, formatSignedMoney, workspaceCurrency } from "@/lib/money";
 import {
-  listPeriodReviews,
-  listTradeReviews,
-  listTradesNeedingReview,
-  savePeriodReview,
-} from "@/lib/reviews.functions";
-import type { Database } from "@/integrations/supabase/types";
-
-type TradeRow = Database["public"]["Tables"]["trades"]["Row"];
+  periodReviewsQueryOptions,
+  queryKeys,
+  tagsQueryOptions,
+  tradeReviewsQueryOptions,
+  tradesNeedingReviewQueryOptions,
+  tradesQueryOptions,
+  tradeTagLinksQueryOptions,
+  workspaceQueryOptions,
+} from "@/lib/queries";
+import { savePeriodReview } from "@/lib/reviews.functions";
 
 export const Route = createFileRoute("/app/reviews")({
   head: () => ({
@@ -34,6 +40,13 @@ export const Route = createFileRoute("/app/reviews")({
       { title: "Reviews — Curated Trades" },
       { name: "description", content: "Work through your review queue and reflect on the week or month." },
     ],
+  }),
+  validateSearch: z.object({
+    tab: z.enum(["queue", "weekly", "monthly"]).optional(),
+    /** 0 = current period, -1 = previous, … */
+    offset: z.number().int().max(0).optional(),
+    /** Id of the queued trade open in the review modal. */
+    review: z.string().optional(),
   }),
   component: ReviewsPage,
 });
@@ -70,61 +83,74 @@ function toDateKey(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+/** The queue's stats cover every unreviewed trade; the table shows the newest
+ * this many (working through them reveals the next ones). */
+const QUEUE_ROWS_SHOWN = 100;
+
+function CommitmentForm({ initial, isPending, onSave }: { initial: string; isPending: boolean; onSave: (commitment: string) => void }) {
+  const form = useAppForm({
+    defaultValues: { commitment: initial },
+    onSubmit: ({ value }) => onSave(value.commitment),
+  });
+  return (
+    <form {...formProps(form)}>
+      <div className="p-4">
+        <form.Field name="commitment">
+          {(field) => (
+            <VoiceTextarea
+              value={field.state.value}
+              onChange={field.handleChange}
+              rows={3}
+              placeholder="One specific thing to do differently next period"
+            />
+          )}
+        </form.Field>
+      </div>
+      <div className="form-actions">
+        <form.AppForm>
+          <form.SubmitButton size="sm" pendingLabel="Saving…" pending={isPending}>
+            Save commitment
+          </form.SubmitButton>
+        </form.AppForm>
+        <span className="text-xs text-muted-foreground">Saved per portfolio, not per account.</span>
+      </div>
+    </form>
+  );
+}
+
 function ReviewsPage() {
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<"queue" | PeriodType>("queue");
-  const [periodOffset, setPeriodOffset] = useState(0);
-  const [reviewingTrade, setReviewingTrade] = useState<TradeRow | null>(null);
+  const navigate = Route.useNavigate();
+  const search = Route.useSearch();
+  const tab = search.tab ?? "queue";
+  const periodOffset = search.offset ?? 0;
+  const setSearch = (patch: { tab?: "queue" | "weekly" | "monthly" | undefined; offset?: number | undefined; review?: string | undefined }) =>
+    void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
 
-  const workspaceQuery = useQuery({ queryKey: ["workspace"], queryFn: () => getWorkspace() });
-  const workspace = workspaceQuery.data;
+  const { data: workspace } = useQuery(workspaceQueryOptions);
   const activePortfolioId = workspace?.activePortfolio.id;
   // Same scope rule as Journal / Analytics / Overview: undefined means
   // "All accounts". Reviews used to ignore the active account entirely.
   const activeAccountId = workspace?.activeAccount?.id;
+  const isQueue = tab === "queue";
 
-  const queueQuery = useQuery({
-    queryKey: ["trades-needing-review", activePortfolioId, activeAccountId],
-    queryFn: () => listTradesNeedingReview({ data: { portfolioId: activePortfolioId as string, accountId: activeAccountId } }),
-    enabled: activePortfolioId != null && tab === "queue",
-  });
+  const queueQuery = useQuery(tradesNeedingReviewQueryOptions(activePortfolioId, activeAccountId, isQueue));
 
   const periodType: PeriodType = tab === "queue" ? "weekly" : tab;
-  const { start, end, label } = useMemo(() => getPeriodRange(periodType, periodOffset), [periodType, periodOffset]);
+  const { start, end, label } = getPeriodRange(periodType, periodOffset);
 
   const tradesQuery = useQuery({
-    queryKey: ["trades", activePortfolioId, activeAccountId, TRADES_LIST_DEFAULT_LIMIT],
-    queryFn: () =>
-      listTrades({ data: { portfolioId: activePortfolioId as string, accountId: activeAccountId, limit: TRADES_LIST_DEFAULT_LIMIT } }),
-    enabled: activePortfolioId != null && tab !== "queue",
+    ...tradesQueryOptions(activePortfolioId, activeAccountId),
+    enabled: !isQueue,
   });
-  const reviewsQuery = useQuery({
-    queryKey: ["trade-reviews-all", activePortfolioId],
-    queryFn: () => listTradeReviews({ data: { portfolioId: activePortfolioId as string } }),
-    enabled: tab !== "queue" && activePortfolioId != null,
-  });
-  const tagLinksQuery = useQuery({
-    queryKey: ["trade-tag-links", activePortfolioId],
-    queryFn: () => listTradeTagLinks({ data: { portfolioId: activePortfolioId as string } }),
-    enabled: tab !== "queue" && activePortfolioId != null,
-  });
-  const tagsQuery = useQuery({ queryKey: ["tags"], queryFn: () => listTags(), enabled: tab !== "queue" });
-
-  const periodReviewsQuery = useQuery({
-    queryKey: ["period-reviews", activePortfolioId, periodType],
-    queryFn: () => listPeriodReviews({ data: { portfolioId: activePortfolioId as string, periodType } }),
-    enabled: activePortfolioId != null && tab !== "queue",
-  });
+  const reviewsQuery = useQuery({ ...tradeReviewsQueryOptions(activePortfolioId), enabled: !isQueue });
+  const tagLinksQuery = useQuery({ ...tradeTagLinksQueryOptions(activePortfolioId), enabled: !isQueue });
+  const tagsQuery = useQuery({ ...tagsQueryOptions, enabled: !isQueue });
+  const periodReviewsQuery = useQuery(periodReviewsQueryOptions(activePortfolioId, periodType, !isQueue));
   const currentPeriodReview = periodReviewsQuery.data?.find((r) => r.period_start === toDateKey(start));
-  const [commitment, setCommitment] = useState("");
-  const periodKey = `${periodType}:${toDateKey(start)}`;
-  useEffect(() => {
-    setCommitment(currentPeriodReview?.commitment ?? "");
-    // Re-seed whenever the period changes or its saved review loads.
-  }, [periodKey, periodReviewsQuery.dataUpdatedAt]);
 
   const saveCommitmentMutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (commitment: string) =>
       savePeriodReview({
         data: {
           portfolioId: activePortfolioId as string,
@@ -134,10 +160,11 @@ function ReviewsPage() {
           commitment: commitment.trim() || null,
         },
       }),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["period-reviews", activePortfolioId, periodType] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: periodReviewsQueryOptions(activePortfolioId, periodType, true).queryKey }),
   });
 
-  const periodStats = useMemo(() => {
+  const periodStats = (() => {
     const trades = (tradesQuery.data ?? []).filter((t) => {
       if (t.status !== "closed" || !t.closed_at) return false;
       const closed = new Date(t.closed_at);
@@ -190,15 +217,18 @@ function ReviewsPage() {
     const reviewedCount = trades.filter((t) => reviewByTradeId.has(t.id)).length;
 
     return { trades, netPnl, winRate, topSetups, topEmotions, topMistakes, bestDecisions: bestDecisions.slice(0, 3), reviewedCount };
-  }, [tradesQuery.data, reviewsQuery.data, tagLinksQuery.data, tagsQuery.data, start, end]);
+  })();
 
-  const accountNameById = useMemo(
-    () => new Map((workspace?.accounts ?? []).map((account) => [account.id, account.name])),
-    [workspace?.accounts],
-  );
+  const accountNameById = new Map((workspace?.accounts ?? []).map((account) => [account.id, account.name]));
   const showAccountColumn = activeAccountId == null && (workspace?.accounts.length ?? 0) > 1;
+  // Aggregates (queue/period/setup totals) display in one currency, matching
+  // the convention used in index.tsx and analytics.tsx. Individual trades in
+  // the queue table — which can span accounts when "All accounts" is
+  // selected, same as showAccountColumn above — use their own account's.
+  const currency = workspace ? workspaceCurrency(workspace) : "USD";
+  const currencyMap = currencyByAccountId(workspace?.accounts ?? []);
 
-  const queueStats = useMemo(() => {
+  const queueStats = (() => {
     const queue = queueQuery.data ?? [];
     const netPnl = queue.reduce((sum, t) => sum + (t.net_pnl ?? 0), 0);
     const wins = queue.filter((t) => (t.net_pnl ?? 0) > 0).length;
@@ -213,23 +243,25 @@ function ReviewsPage() {
       winRate: queue.length > 0 ? Math.round((wins / queue.length) * 100) : null,
       oldestDays: oldest != null ? Math.max(0, Math.floor((Date.now() - oldest) / 86_400_000)) : null,
     };
-  }, [queueQuery.data]);
+  })();
 
   function invalidateQueue() {
-    void queryClient.invalidateQueries({ queryKey: ["trades-needing-review", activePortfolioId] });
-    void queryClient.invalidateQueries({ queryKey: ["trade-reviews-all"] });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.tradesNeedingReview(activePortfolioId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.tradeReviews() });
+    // Analytics includes review data (emotions, mistakes), and the Journal rows
+    // show a reviewed flag — both live under the portfolio's "trades" keys.
+    void queryClient.invalidateQueries({ queryKey: queryKeys.trades(activePortfolioId) });
   }
 
-  if (workspaceQuery.isLoading || !workspace) {
+  if (!workspace) {
     return <p className="py-10 text-center text-sm text-muted-foreground">Loading reviews…</p>;
   }
 
   const queue = queueQuery.data ?? [];
+  const reviewingTrade = search.review ? (queue.find((trade) => trade.id === search.review) ?? null) : null;
   const scopeLabel = workspace.activeAccount?.name ?? "All accounts";
 
   const pnlClass = (value: number) => (value >= 0 ? "text-chart-2" : "text-destructive");
-  const money = (value: number) =>
-    `${value < 0 ? "−" : ""}$${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
   return (
     <>
@@ -244,14 +276,14 @@ function ReviewsPage() {
       </section>
 
       <div className="tab-bar mb-5" role="tablist">
-        <button type="button" role="tab" aria-selected={tab === "queue"} className={`tab ${tab === "queue" ? "tab-active" : ""}`} onClick={() => setTab("queue")}>
+        <button type="button" role="tab" aria-selected={tab === "queue"} className={`tab ${tab === "queue" ? "tab-active" : ""}`} onClick={() => setSearch({ tab: undefined, offset: undefined })}>
           <ClipboardList className="size-4" /> Review queue
           {queueStats.count > 0 && <Badge variant={tab === "queue" ? "default" : "secondary"}>{queueStats.count}</Badge>}
         </button>
-        <button type="button" role="tab" aria-selected={tab === "weekly"} className={`tab ${tab === "weekly" ? "tab-active" : ""}`} onClick={() => setTab("weekly")}>
+        <button type="button" role="tab" aria-selected={tab === "weekly"} className={`tab ${tab === "weekly" ? "tab-active" : ""}`} onClick={() => setSearch({ tab: "weekly", offset: undefined })}>
           Weekly review
         </button>
-        <button type="button" role="tab" aria-selected={tab === "monthly"} className={`tab ${tab === "monthly" ? "tab-active" : ""}`} onClick={() => setTab("monthly")}>
+        <button type="button" role="tab" aria-selected={tab === "monthly"} className={`tab ${tab === "monthly" ? "tab-active" : ""}`} onClick={() => setSearch({ tab: "monthly", offset: undefined })}>
           Monthly review
         </button>
       </div>
@@ -265,7 +297,7 @@ function ReviewsPage() {
             </div>
             <div className="metric-card">
               <p className="eyebrow mb-1">Net P&L in queue</p>
-              <p className={`metric-value ${queueStats.count > 0 ? pnlClass(queueStats.netPnl) : ""}`}>{queueStats.count > 0 ? money(queueStats.netPnl) : "—"}</p>
+              <p className={`metric-value ${queueStats.count > 0 ? pnlClass(queueStats.netPnl) : ""}`}>{queueStats.count > 0 ? formatSignedMoney(queueStats.netPnl, currency) : "—"}</p>
             </div>
             <div className="metric-card">
               <p className="eyebrow mb-1">Win rate in queue</p>
@@ -280,7 +312,11 @@ function ReviewsPage() {
           <div className="surface-panel overflow-hidden p-0">
             <div className="panel-bar">
               <h2 className="panel-title">Closed trades without a review</h2>
-              <span className="text-xs text-muted-foreground">Most recent first</span>
+              <span className="text-xs text-muted-foreground">
+                {queue.length > QUEUE_ROWS_SHOWN
+                  ? `Most recent ${QUEUE_ROWS_SHOWN} of ${queue.length.toLocaleString()} — the totals above cover all of them`
+                  : "Most recent first"}
+              </span>
             </div>
             {queueQuery.isLoading ? (
               <p className="py-10 text-center text-sm text-muted-foreground">Loading queue…</p>
@@ -304,7 +340,7 @@ function ReviewsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {queue.map((trade) => (
+                    {queue.slice(0, QUEUE_ROWS_SHOWN).map((trade) => (
                       <tr key={trade.id}>
                         <td className="text-muted-foreground">{trade.closed_at ? new Date(trade.closed_at).toLocaleDateString() : "—"}</td>
                         <td className="font-semibold">{trade.symbol}</td>
@@ -314,9 +350,9 @@ function ReviewsPage() {
                         {showAccountColumn && (
                           <td className="text-muted-foreground">{trade.account_id ? (accountNameById.get(trade.account_id) ?? "—") : "—"}</td>
                         )}
-                        <td className={`num font-mono font-semibold ${pnlClass(trade.net_pnl ?? 0)}`}>{money(trade.net_pnl ?? 0)}</td>
+                        <td className={`num font-mono font-semibold ${pnlClass(trade.net_pnl ?? 0)}`}>{formatSignedMoney(trade.net_pnl ?? 0, currencyMap.get(trade.account_id) ?? currency)}</td>
                         <td className="num">
-                          <Button type="button" variant="outline" size="sm" onClick={() => setReviewingTrade(trade)}>
+                          <Button type="button" variant="outline" size="sm" onClick={() => setSearch({ review: trade.id })}>
                             Review
                           </Button>
                         </td>
@@ -333,7 +369,7 @@ function ReviewsPage() {
       {(tab === "weekly" || tab === "monthly") && (
         <div className="space-y-4">
           <div className="flex items-center gap-2">
-            <Button type="button" variant="outline" size="icon" aria-label="Previous period" onClick={() => setPeriodOffset((o) => o - 1)}>
+            <Button type="button" variant="outline" size="icon" aria-label="Previous period" onClick={() => setSearch({ offset: periodOffset - 1 })}>
               <ChevronLeft />
             </Button>
             <div className="flex h-8 min-w-48 items-center justify-center rounded-md border border-input bg-card px-3 text-[13px] font-semibold shadow-xs">
@@ -344,13 +380,13 @@ function ReviewsPage() {
               variant="outline"
               size="icon"
               aria-label="Next period"
-              onClick={() => setPeriodOffset((o) => Math.min(0, o + 1))}
+              onClick={() => setSearch({ offset: Math.min(0, periodOffset + 1) || undefined })}
               disabled={periodOffset >= 0}
             >
               <ChevronRight />
             </Button>
             {periodOffset < 0 && (
-              <Button type="button" variant="ghost" size="sm" onClick={() => setPeriodOffset(0)}>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setSearch({ offset: undefined })}>
                 Current {periodType === "weekly" ? "week" : "month"}
               </Button>
             )}
@@ -364,7 +400,7 @@ function ReviewsPage() {
             <div className="metric-card">
               <p className="eyebrow mb-1">Net P&L</p>
               <p className={`metric-value ${periodStats.trades.length > 0 ? pnlClass(periodStats.netPnl) : ""}`}>
-                {periodStats.trades.length > 0 ? money(periodStats.netPnl) : "—"}
+                {periodStats.trades.length > 0 ? formatSignedMoney(periodStats.netPnl, currency) : "—"}
               </p>
             </div>
             <div className="metric-card">
@@ -401,7 +437,7 @@ function ReviewsPage() {
                       <tr key={name}>
                         <td className="max-w-40 truncate">{name}</td>
                         <td className="num font-mono">{stats.count}</td>
-                        <td className={`num font-mono font-semibold ${pnlClass(stats.netPnl)}`}>{money(stats.netPnl)}</td>
+                        <td className={`num font-mono font-semibold ${pnlClass(stats.netPnl)}`}>{formatSignedMoney(stats.netPnl, currency)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -467,20 +503,13 @@ function ReviewsPage() {
             <div className="panel-bar">
               <h3 className="panel-title">Next-{periodType === "weekly" ? "week" : "month"} commitment</h3>
             </div>
-            <div className="p-4">
-              <VoiceTextarea
-                value={commitment}
-                onChange={setCommitment}
-                rows={3}
-                placeholder="One specific thing to do differently next period"
-              />
-            </div>
-            <div className="form-actions">
-              <Button type="button" size="sm" disabled={saveCommitmentMutation.isPending} onClick={() => saveCommitmentMutation.mutate()}>
-                {saveCommitmentMutation.isPending ? "Saving…" : "Save commitment"}
-              </Button>
-              <span className="text-xs text-muted-foreground">Saved per portfolio, not per account.</span>
-            </div>
+            {/* Re-seeded (via key) whenever the period changes or its saved review loads. */}
+            <CommitmentForm
+              key={`${periodType}:${toDateKey(start)}:${currentPeriodReview?.id ?? "none"}`}
+              initial={currentPeriodReview?.commitment ?? ""}
+              isPending={saveCommitmentMutation.isPending}
+              onSave={(commitment) => saveCommitmentMutation.mutate(commitment)}
+            />
           </div>
         </div>
       )}
@@ -488,9 +517,9 @@ function ReviewsPage() {
       {reviewingTrade && (
         <TradeReviewModal
           trade={reviewingTrade}
-          onClose={() => setReviewingTrade(null)}
+          onClose={() => setSearch({ review: undefined })}
           onSaved={() => {
-            setReviewingTrade(null);
+            setSearch({ review: undefined });
             invalidateQueue();
           }}
         />

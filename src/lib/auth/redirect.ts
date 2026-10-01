@@ -2,6 +2,8 @@
 // that accepts a `?redirect=` param (sign-in, sign-up) so the open-redirect
 // protection lives in exactly one place instead of being re-implemented
 // (and potentially re-broken) per route.
+import { z } from "zod";
+
 export const DEFAULT_AUTH_REDIRECT = "/app";
 
 /** Only ever returns a same-origin, absolute path. Rejects anything that
@@ -14,3 +16,10 @@ export function sanitizeRedirect(value: unknown): string {
   if (!value.startsWith("/") || value.startsWith("//")) return DEFAULT_AUTH_REDIRECT;
   return value;
 }
+
+/** Router `validateSearch` schema shared by /sign-in and /sign-up. `redirect`
+ * stays genuinely optional (undefined, not defaulted) so a plain visit doesn't
+ * trigger a search-param canonicalization redirect on load. */
+export const authSearchSchema = z.object({
+  redirect: z.string().transform(sanitizeRedirect).optional(),
+});

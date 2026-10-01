@@ -1,13 +1,17 @@
-// Password reset request/confirmation page. Deliberately never reveals
-// whether a given email has an account (the notice text is identical either
-// way) — this is the standard anti-enumeration pattern, matching how
-// Supabase's own signUp() avoids leaking the same information.
+// "Forgot password" request page: asks Supabase to email a reset link that
+// lands on /app. Deliberately has NO signed-in redirect guard (unlike sign-in
+// and sign-up) — someone arriving from a recovery email already holds a
+// session, and bouncing them away from here would be wrong.
+//
+// TanStack Form owns the email field + zod validation; a Query mutation owns
+// the request's pending/error/success state, so there are no hand-rolled
+// `sent` / `error` / `isSubmitting` flags.
+import { useMutation } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState, type FormEvent } from "react";
+import { z } from "zod";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
+import { formProps, useAppForm } from "@/lib/form";
 
 export const Route = createFileRoute("/reset-password")({
   head: () => ({
@@ -16,66 +20,56 @@ export const Route = createFileRoute("/reset-password")({
   component: ResetPasswordPage,
 });
 
+const resetSchema = z.object({
+  email: z.string().trim().pipe(z.email("Enter a valid email address.")),
+});
+
 function ResetPasswordPage() {
-  const [email, setEmail] = useState("");
-  const [error, setError] = useState("");
-  const [sent, setSent] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const reset = useMutation({
+    mutationFn: async ({ email }: z.infer<typeof resetSchema>) => {
+      const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+        redirectTo: `${window.location.origin}/app`,
+      });
+      if (error) throw error;
+    },
+  });
 
-  async function onSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (isSubmitting) return;
-    setError("");
-    setIsSubmitting(true);
-
-    const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: `${window.location.origin}/app`,
-    });
-
-    setIsSubmitting(false);
-    if (resetError) {
-      setError(resetError.message);
-      return;
-    }
-    setSent(true);
-  }
+  const form = useAppForm({
+    defaultValues: { email: "" },
+    validators: { onSubmit: resetSchema },
+    onSubmit: ({ value }) => reset.mutate(value),
+  });
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4 py-10 text-foreground">
       <div className="w-full max-w-sm">
         <Link to="/" className="mb-8 flex items-center justify-center gap-3">
           <span className="brand-mark" aria-hidden="true" />
-          <span className="wordmark">Curated <em>Trades</em></span>
+          <span className="wordmark">
+            Curated <em>Trades</em>
+          </span>
         </Link>
 
         <div className="surface-panel">
           <h1 className="mb-6 font-serif text-xl font-medium">Reset your password</h1>
 
-          {sent ? (
+          {reset.isSuccess ? (
             <p className="text-sm text-chart-2">
               If an account exists for that email, a reset link is on its way. Check your inbox.
             </p>
           ) : (
-            <form onSubmit={onSubmit} className="space-y-5">
-              <div>
-                <label htmlFor="reset-email" className="field-label">
-                  Email
-                </label>
-                <Input
-                  id="reset-email"
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  placeholder="you@email.com"
-                  autoComplete="email"
-                  autoFocus
-                />
-              </div>
-              {error && <p className="text-sm text-destructive">{error}</p>}
-              <Button type="submit" className="w-full" disabled={isSubmitting}>
-                {isSubmitting ? "Sending…" : "Send reset link"}
-              </Button>
+            <form {...formProps(form)} className="space-y-5">
+              <form.AppField name="email">
+                {(field) => (
+                  <field.TextField label="Email" type="email" placeholder="you@email.com" autoComplete="email" autoFocus />
+                )}
+              </form.AppField>
+              {reset.error && <p className="text-sm text-destructive">{reset.error.message}</p>}
+              <form.AppForm>
+                <form.SubmitButton className="w-full" pendingLabel="Sending…" pending={reset.isPending}>
+                  Send reset link
+                </form.SubmitButton>
+              </form.AppForm>
             </form>
           )}
 

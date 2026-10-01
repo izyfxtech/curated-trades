@@ -7,6 +7,7 @@ import { z } from "zod";
 
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { friendlyNotFoundError } from "@/lib/db-errors";
+import { fetchAllRows } from "@/lib/paging";
 import type { Database } from "@/integrations/supabase/types";
 
 type TradeReviewRow = Database["public"]["Tables"]["trade_reviews"]["Row"];
@@ -19,7 +20,14 @@ const listNeedingReviewSchema = z.object({
   accountId: z.string().uuid().optional(),
 });
 
-/** Closed trades in a portfolio that don't have a review yet — the review queue. */
+/** Closed trades in a portfolio that don't have a review yet — the review queue.
+ *
+ * "No review" is expressed as an anti-join (`trade_reviews is null` on the
+ * embedded relation), so the database does the work. This replaced fetching
+ * the id of every reviewed trade and sending them all back in a
+ * `NOT IN (id, id, …)` URL — which breaks once a few hundred trades have been
+ * reviewed (the request line gets too long) — and dropped a hard cap of 200
+ * rows that hid the rest of the queue. */
 export const listTradesNeedingReview = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .validator(listNeedingReviewSchema)
@@ -29,31 +37,18 @@ export const listTradesNeedingReview = createServerFn({ method: "GET" })
     // separate ownership round trip is needed here.
     const { supabase, userId } = context;
 
-    const { data: reviewed, error: reviewedError } = await supabase
-      .from("trade_reviews")
-      .select("trade_id")
-      .eq("owner_id", userId);
-    if (reviewedError) throw new Error(reviewedError.message);
-    const reviewedIds = (reviewed ?? []).map((r) => r.trade_id);
-
-    let query = supabase
-      .from("trades")
-      .select("*")
-      .eq("owner_id", userId)
-      .eq("portfolio_id", data.portfolioId)
-      .eq("status", "closed")
-      .order("closed_at", { ascending: false })
-      .limit(200);
-    if (data.accountId) {
-      query = query.eq("account_id", data.accountId);
-    }
-    if (reviewedIds.length > 0) {
-      query = query.not("id", "in", `(${reviewedIds.join(",")})`);
-    }
-
-    const { data: trades, error } = await query;
-    if (error) throw new Error(error.message);
-    return trades ?? [];
+    const rows = await fetchAllRows((from, to) => {
+      let query = supabase
+        .from("trades")
+        .select("*, trade_reviews(id)")
+        .eq("owner_id", userId)
+        .eq("portfolio_id", data.portfolioId)
+        .eq("status", "closed")
+        .is("trade_reviews", null);
+      if (data.accountId) query = query.eq("account_id", data.accountId);
+      return query.order("closed_at", { ascending: false }).order("id", { ascending: false }).range(from, to);
+    });
+    return rows.map(({ trade_reviews: _none, ...trade }) => trade as TradeRow);
   });
 
 /** The user's trade reviews, scoped to a portfolio the same way as
@@ -65,13 +60,14 @@ export const listTradeReviews = createServerFn({ method: "GET" })
   .validator(z.object({ portfolioId: z.string().uuid().optional() }))
   .handler(async ({ context, data }): Promise<TradeReviewRow[]> => {
     const { supabase, userId } = context;
-    let query = supabase.from("trade_reviews").select("*, trades!inner(portfolio_id)").eq("owner_id", userId);
-    if (data.portfolioId) {
-      query = query.eq("trades.portfolio_id", data.portfolioId);
-    }
-    const { data: rows, error } = await query;
-    if (error) throw new Error(error.message);
-    return (rows ?? []).map(({ trades: _trades, ...row }) => row as TradeReviewRow);
+    const rows = await fetchAllRows((from, to) => {
+      let query = supabase.from("trade_reviews").select("*, trades!inner(portfolio_id)").eq("owner_id", userId);
+      if (data.portfolioId) {
+        query = query.eq("trades.portfolio_id", data.portfolioId);
+      }
+      return query.order("trade_id").range(from, to);
+    });
+    return rows.map(({ trades: _trades, ...row }) => row as TradeReviewRow);
   });
 
 const getTradeReviewSchema = z.object({ tradeId: z.string().uuid() });

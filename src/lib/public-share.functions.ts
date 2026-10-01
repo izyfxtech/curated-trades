@@ -56,6 +56,8 @@ export interface SharedComment {
 export interface SharedReport {
   label: string;
   portfolioName: string;
+  /** The portfolio's first account's currency (accounts can differ; this matches the convention used everywhere else — see money.ts's workspaceCurrency). */
+  currency: string;
   permission: string;
   hideDollarPnl: boolean;
   periodStart: string | null;
@@ -82,6 +84,21 @@ export const getSharedReport = createServerFn({ method: "GET" })
       .maybeSingle();
     if (portfolioError) throw new Error(portfolioError.message);
     if (!portfolio) throw new Error("This link is invalid.");
+
+    // Same convention as workspaceCurrency() in lib/money.ts: the portfolio's
+    // first account's currency. A share's trades aren't filtered to one
+    // account, so if the portfolio holds accounts in different currencies
+    // this is an approximation — same tradeoff the app already makes for
+    // "All accounts" totals everywhere else.
+    const { data: shareAccounts, error: accountsError } = await supabaseAdmin
+      .from("accounts")
+      .select("base_currency")
+      .eq("portfolio_id", share.portfolio_id)
+      .eq("owner_id", share.owner_id)
+      .order("created_at", { ascending: true })
+      .limit(1);
+    if (accountsError) throw new Error(accountsError.message);
+    const currency = (shareAccounts?.[0]?.base_currency ?? "USD").toUpperCase();
 
     let tradesQuery = supabaseAdmin
       .from("trades")
@@ -140,6 +157,7 @@ export const getSharedReport = createServerFn({ method: "GET" })
     return {
       label: share.label,
       portfolioName: portfolio.name,
+      currency,
       permission: share.permission,
       hideDollarPnl: share.hide_dollar_pnl,
       periodStart: share.period_start,

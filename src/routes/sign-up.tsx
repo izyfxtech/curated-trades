@@ -1,32 +1,20 @@
-// Sign-up page — see sign-in.tsx's header comment for why this is a
-// separate route rather than a mode toggle on one shared component.
-//
-// Two real edge cases this handles, both specific to sign-up (not sign-in),
-// worth understanding before touching this file:
-//  1. With email confirmation OFF (this project's current setting), signing
-//     up with an email that's already registered comes back as a normal
-//     error immediately — no masking. Showing the error and stopping there
-//     isn't enough on its own: leaving the person on the sign-up form with
-//     their *new* password still in the field, when what they need is
-//     their *original* password, reads as "it says I have an account but I
-//     can't log in". So this also switches them to a sign-in link and
-//     clears the password field.
-//  2. Supabase returns a *masked* success (no error, no session, an empty
-//     `identities` array) for one specific case: someone who already has an
-//     account via a different provider (e.g. Google) trying to sign up
-//     again with email/password using the same address. That has to be
-//     detected explicitly — it isn't shaped like an error.
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type FormEvent } from "react";
+// Sign-up page. Kept separate from /sign-in so each flow owns its own
+// messages, and so the account-already-exists handling below — Supabase can
+// signal it two different ways depending on whether email confirmation is on
+// (an explicit error, or a "success" with an empty identities list) — lives
+// in exactly one place. Built on TanStack Form (fields + zod validation),
+// Query mutations (in-flight/error state for each Supabase call) and Router
+// (`beforeLoad` skips the page for someone already signed in).
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute, Link, redirect } from "@tanstack/react-router";
+import { z } from "zod";
 
 import { AuthPageShell } from "@/components/auth/AuthPageShell";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/lib/auth/session-context";
-import { sanitizeRedirect } from "@/lib/auth/redirect";
-import { getWorkspace } from "@/lib/portfolios.functions";
+import { authSearchSchema } from "@/lib/auth/redirect";
+import { formProps, useAppForm } from "@/lib/form";
+import { sessionQueryOptions, workspaceQueryOptions } from "@/lib/queries";
 
 export const Route = createFileRoute("/sign-up")({
   head: () => ({
@@ -35,104 +23,93 @@ export const Route = createFileRoute("/sign-up")({
       { name: "description", content: "Start journaling your trades with Curated Trades." },
     ],
   }),
-  validateSearch: (search: Record<string, unknown>): { redirect?: string } => {
-    if (typeof search["redirect"] !== "string") return {};
-    return { redirect: sanitizeRedirect(search["redirect"]) };
+  validateSearch: authSearchSchema,
+  // Session lives in browser localStorage: client-side guard only.
+  ssr: false,
+  beforeLoad: async ({ context, search }) => {
+    const session = await context.queryClient.ensureQueryData(sessionQueryOptions);
+    if (session) throw redirect({ href: search.redirect ?? "/app" });
   },
   component: SignUpPage,
 });
 
+const signUpSchema = z.object({
+  displayName: z.string(),
+  email: z.string().trim().pipe(z.email("Enter a valid email address.")),
+  password: z.string().min(6, "Use at least 6 characters."),
+});
+
+type SignUpOutcome =
+  | { kind: "signed-in" }
+  | { kind: "exists"; message: string }
+  | { kind: "confirm-email" };
+
+const ALREADY_EXISTS_EMAIL = "An account with this email already exists. Sign in below, or reset your password if you don't remember it.";
+const ALREADY_EXISTS_IDENTITY = 'An account with this email already exists — try "Continue with Google" or reset your password.';
+
 function SignUpPage() {
-  const navigate = useNavigate();
+  const navigate = Route.useNavigate();
   const queryClient = useQueryClient();
-  const { status } = useAuth();
   const search = Route.useSearch();
   const target = search.redirect ?? "/app";
 
-  const [displayName, setDisplayName] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const [redirectToSignIn, setRedirectToSignIn] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  useEffect(() => {
-    if (status === "authed") void navigate({ to: target });
-  }, [status, navigate, target]);
-
-  async function onSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (isSubmitting) return;
-    setError("");
-    setNotice("");
-    setRedirectToSignIn(false);
-    setIsSubmitting(true);
-
-    const { data, error: signUpError } = await supabase.auth.signUp({
-      email: email.trim(),
-      password,
-      options: { data: { display_name: displayName.trim() } },
-    });
-
-    setIsSubmitting(false);
-
-    if (signUpError) {
-      const message = signUpError.message.toLowerCase();
-      if (message.includes("already registered") || message.includes("already exists")) {
-        setError("An account with this email already exists. Sign in below, or reset your password if you don't remember it.");
-        setRedirectToSignIn(true);
-        setPassword("");
-        return;
+  const signUp = useMutation({
+    mutationFn: async (values: z.infer<typeof signUpSchema>): Promise<SignUpOutcome> => {
+      const { data, error } = await supabase.auth.signUp({
+        email: values.email.trim(),
+        password: values.password,
+        options: { data: { display_name: values.displayName.trim() } },
+      });
+      if (error) {
+        const message = error.message.toLowerCase();
+        if (message.includes("already registered") || message.includes("already exists")) {
+          return { kind: "exists", message: ALREADY_EXISTS_EMAIL };
+        }
+        throw error;
       }
-      setError(signUpError.message);
-      return;
-    }
-
-    if (!data.session) {
-      // Masked cross-provider case (see file header) vs. the ordinary
-      // "check your email to confirm" case — both have no session, only the
-      // masked one has an empty identities array.
-      const alreadyRegistered = (data.user?.identities?.length ?? 0) === 0;
-      if (alreadyRegistered) {
-        setError('An account with this email already exists — try "Continue with Google" or reset your password.');
-        setRedirectToSignIn(true);
-        setPassword("");
-        return;
+      if (!data.session) {
+        // Supabase's "success" for an address that's already registered: no
+        // session, and a user object with zero identities.
+        const alreadyRegistered = (data.user?.identities?.length ?? 0) === 0;
+        return alreadyRegistered ? { kind: "exists", message: ALREADY_EXISTS_IDENTITY } : { kind: "confirm-email" };
       }
-      setNotice("Check your email to confirm your account, then sign in.");
-      setRedirectToSignIn(true);
-      setPassword("");
-      return;
-    }
+      return { kind: "signed-in" };
+    },
+    onSuccess: (outcome) => {
+      if (outcome.kind === "signed-in") {
+        // Overlap the workspace fetch with the route transition — see sign-in.tsx.
+        void queryClient.prefetchQuery(workspaceQueryOptions);
+        void navigate({ to: target });
+      } else {
+        form.setFieldValue("password", "");
+      }
+    },
+  });
 
-    void queryClient.prefetchQuery({ queryKey: ["workspace"], queryFn: () => getWorkspace() });
-    void navigate({ to: target });
-  }
+  const google = useMutation({
+    mutationFn: async () => {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: `${window.location.origin}${target}` },
+      });
+      if (error) throw error;
+    },
+  });
 
-  async function onGoogleSignUp() {
-    if (isSubmitting) return;
-    setError("");
-    setIsSubmitting(true);
-    const { error: oauthError } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: `${window.location.origin}${target}` },
-    });
-    if (oauthError) {
-      setError(oauthError.message);
-      setIsSubmitting(false);
-    }
-  }
+  const form = useAppForm({
+    defaultValues: { displayName: "", email: "", password: "" },
+    validators: { onSubmit: signUpSchema },
+    onSubmit: ({ value }) => signUp.mutate(value),
+  });
+
+  const outcome = signUp.data;
+  const errorMessage = signUp.error?.message ?? google.error?.message ?? (outcome?.kind === "exists" ? outcome.message : undefined);
+  const showSignInLink = outcome?.kind === "exists" || outcome?.kind === "confirm-email";
+  const isBusy = signUp.isPending || google.isPending;
 
   return (
     <AuthPageShell title="Start journaling with intent">
-      <Button
-        type="button"
-        variant="outline"
-        className="mb-5 w-full"
-        onClick={() => void onGoogleSignUp()}
-        disabled={isSubmitting}
-      >
+      <Button type="button" variant="outline" className="mb-5 w-full" onClick={() => google.mutate()} disabled={isBusy}>
         Continue with Google
       </Button>
       <div className="mb-5 flex items-center gap-3 text-xs text-muted-foreground">
@@ -141,53 +118,24 @@ function SignUpPage() {
         <span className="h-px flex-1 bg-border" />
       </div>
 
-      <form onSubmit={onSubmit} className="space-y-5">
-        <div>
-          <label htmlFor="signup-name" className="field-label">
-            Display name
-          </label>
-          <Input
-            id="signup-name"
-            value={displayName}
-            onChange={(event) => setDisplayName(event.target.value)}
-            placeholder="Izy Eberendu"
-            autoComplete="name"
-          />
-        </div>
-        <div>
-          <label htmlFor="signup-email" className="field-label">
-            Email
-          </label>
-          <Input
-            id="signup-email"
-            type="email"
-            required
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            placeholder="you@email.com"
-            autoComplete="email"
-            autoFocus
-          />
-        </div>
-        <div>
-          <label htmlFor="signup-password" className="field-label">
-            Password
-          </label>
-          <Input
-            id="signup-password"
-            type="password"
-            required
-            minLength={6}
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            placeholder="••••••••"
-            autoComplete="new-password"
-          />
-        </div>
-        {error && (
+      <form {...formProps(form)} className="space-y-5">
+        <form.AppField name="displayName">
+          {(field) => <field.TextField label="Display name" placeholder="Izy Eberendu" autoComplete="name" />}
+        </form.AppField>
+        <form.AppField name="email">
+          {(field) => (
+            <field.TextField label="Email" type="email" placeholder="you@email.com" autoComplete="email" autoFocus />
+          )}
+        </form.AppField>
+        <form.AppField name="password">
+          {(field) => (
+            <field.TextField label="Password" type="password" placeholder="••••••••" autoComplete="new-password" />
+          )}
+        </form.AppField>
+        {errorMessage && (
           <div className="text-sm text-destructive">
-            <p>{error}</p>
-            {redirectToSignIn && (
+            <p>{errorMessage}</p>
+            {showSignInLink && (
               <Link
                 to="/sign-in"
                 search={search.redirect ? { redirect: search.redirect } : {}}
@@ -198,13 +146,30 @@ function SignUpPage() {
             )}
           </div>
         )}
-        {notice && <p className="text-sm text-chart-2">{notice}</p>}
-        <Button type="submit" className="w-full" disabled={isSubmitting}>
-          {isSubmitting ? "Please wait…" : "Create account"}
-        </Button>
+        {outcome?.kind === "confirm-email" && (
+          <div className="text-sm text-chart-2">
+            <p>Check your email to confirm your account, then sign in.</p>
+            <Link
+              to="/sign-in"
+              search={search.redirect ? { redirect: search.redirect } : {}}
+              className="mt-1 inline-block font-medium underline-offset-2 hover:underline"
+            >
+              Go to sign in
+            </Link>
+          </div>
+        )}
+        <form.AppForm>
+          <form.SubmitButton className="w-full" pending={isBusy}>
+            Create account
+          </form.SubmitButton>
+        </form.AppForm>
         <p className="text-center text-xs text-muted-foreground">
           Already journaling?{" "}
-          <Link to="/sign-in" className="font-semibold text-primary underline-offset-2 hover:underline">
+          <Link
+            to="/sign-in"
+            search={search.redirect ? { redirect: search.redirect } : {}}
+            className="font-semibold text-primary underline-offset-2 hover:underline"
+          >
             Sign in
           </Link>
         </p>

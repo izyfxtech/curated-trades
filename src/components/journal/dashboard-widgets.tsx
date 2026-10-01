@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { calculateHoldingSeconds, detectSessionFallback } from "@/lib/trade-calc";
+import { formatSignedMoney } from "@/lib/money";
 import type { Database } from "@/integrations/supabase/types";
 
 type TradeRowData = Database["public"]["Tables"]["trades"]["Row"];
@@ -104,6 +105,7 @@ export function TradeRow({
   trade,
   tags,
   attachmentCount,
+  currency,
   isDeleting = false,
   onOpenDetail,
   onEdit,
@@ -112,6 +114,8 @@ export function TradeRow({
   trade: TradeRowData;
   tags: TagRowData[];
   attachmentCount: number;
+  /** The trade's own account's currency — trades in the same table can belong to different accounts. */
+  currency: string;
   isDeleting?: boolean;
   onOpenDetail: () => void;
   onEdit: () => void;
@@ -166,8 +170,7 @@ export function TradeRow({
       <td>
         {trade.status === "closed" ? (
           <span className={`font-mono font-semibold ${netPnl > 0 ? "text-chart-2" : "text-destructive"}`}>
-            {netPnl > 0 ? "+" : "−"}$
-            {Math.abs(netPnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            {formatSignedMoney(netPnl, currency)}
           </span>
         ) : (
           <span className="text-xs text-muted-foreground">—</span>

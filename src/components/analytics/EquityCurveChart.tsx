@@ -10,6 +10,7 @@ import { format } from "date-fns";
 import { useState } from "react";
 
 import type { EquityCurvePoint } from "@/lib/equity-curve";
+import { formatMoney, formatSignedMoney } from "@/lib/money";
 
 export interface EquityCurveChartProps {
   points: EquityCurvePoint[];
@@ -17,9 +18,10 @@ export interface EquityCurveChartProps {
   labels: string[];
   width: number;
   height: number;
+  currency?: string;
 }
 
-export function EquityCurveChart({ points, polyline, labels, width, height }: EquityCurveChartProps) {
+export function EquityCurveChart({ points, polyline, labels, width, height, currency = "USD" }: EquityCurveChartProps) {
   const navigate = useNavigate();
   const [hovered, setHovered] = useState<EquityCurvePoint | null>(null);
   const lastIndex = points.length - 1;
@@ -81,10 +83,10 @@ export function EquityCurveChart({ points, polyline, labels, width, height }: Eq
               <>
                 <p className="text-sm font-semibold">{hovered.symbol}</p>
                 <p className={`font-mono text-xs font-medium ${(hovered.netPnl ?? 0) >= 0 ? "text-chart-2" : "text-destructive"}`}>
-                  {(hovered.netPnl ?? 0) >= 0 ? "+" : "−"}${Math.abs(hovered.netPnl ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  {formatSignedMoney(hovered.netPnl ?? 0, currency, 2)}
                 </p>
                 <p className="font-mono text-[0.68rem] text-muted-foreground">
-                  balance ${hovered.value.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  balance {formatMoney(hovered.value, currency)}
                 </p>
                 <p className="mt-1 text-[0.68rem] text-muted-foreground">Click to open</p>
               </>

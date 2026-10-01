@@ -8,21 +8,25 @@
 // history — this page never blocks trade entry; see the note in the banner
 // below for why a client-side lockout wouldn't be a real security boundary
 // anyway.
-import { createFileRoute } from "@tanstack/react-router";
+//
+// Which account is shown (?account=) and whether the rule editor is open
+// (?edit=true) are URL search params; the editor is a TanStack Form mounted
+// per account, so switching accounts can never carry one account's unsaved
+// rules over to another (the old page needed a `formAccountId` bookkeeping
+// state and a sync effect to guard against exactly that — see DECISIONS.md).
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type FormEvent } from "react";
+import { createFileRoute } from "@tanstack/react-router";
 import { AlertTriangle, CheckCircle2, Pencil, ShieldCheck } from "lucide-react";
+import { toast } from "sonner";
+import { z } from "zod";
 
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { getWorkspace } from "@/lib/portfolios.functions";
-import { getComplianceOverview, upsertPropFirmRules } from "@/lib/prop-firm.functions";
-import type { ComplianceStatus } from "@/lib/prop-firm-calc";
+import { Button } from "@/components/ui/button";
 import type { Database } from "@/integrations/supabase/types";
+import { formProps, useAppForm } from "@/lib/form";
+import { upsertPropFirmRules } from "@/lib/prop-firm.functions";
+import type { ComplianceStatus } from "@/lib/prop-firm-calc";
+import { propFirmOverviewQueryOptions, workspaceQueryOptions } from "@/lib/queries";
 
 type PropFirmRulesRow = Database["public"]["Tables"]["prop_firm_rules"]["Row"];
 
@@ -33,23 +37,36 @@ export const Route = createFileRoute("/app/prop-rules")({
       { name: "description", content: "Track daily loss, drawdown, and profit-target compliance against a prop firm's rules." },
     ],
   }),
+  validateSearch: z.object({
+    /** Account whose rules are shown; defaults to the sidebar's active account. */
+    account: z.string().optional(),
+    edit: z.boolean().optional(),
+  }),
   component: PropRulesPage,
 });
 
-interface RuleForm {
-  isActive: boolean;
-  timezone: string;
-  calculationBasis: "starting_balance" | "current_balance" | "high_water_mark";
-  maxDailyLossPercent: string;
-  maxTotalDrawdownPercent: string;
-  profitTargetPercent: string;
-  minTradingDays: string;
-  maxTradingDays: string;
-  consistencyPercent: string;
-  allowWeekendHolding: boolean;
-  allowNewsTrading: boolean;
-  notes: string;
-}
+const optionalNumber = (label: string, { integer = false, max }: { integer?: boolean; max?: number } = {}) =>
+  z.string().refine((value) => {
+    if (value.trim() === "") return true;
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 && (!integer || Number.isInteger(n)) && (max == null || n <= max);
+  }, `${label} must be a valid number`);
+
+const ruleSchema = z.object({
+  isActive: z.boolean(),
+  timezone: z.string(),
+  calculationBasis: z.enum(["starting_balance", "current_balance", "high_water_mark"]),
+  maxDailyLossPercent: z.string().refine((v) => Number.isFinite(Number(v)) && v.trim() !== "" && Number(v) >= 0, "Enter the max daily loss %"),
+  maxTotalDrawdownPercent: z.string().refine((v) => Number.isFinite(Number(v)) && v.trim() !== "" && Number(v) >= 0, "Enter the max total drawdown %"),
+  profitTargetPercent: optionalNumber("Profit target"),
+  minTradingDays: optionalNumber("Min trading days", { integer: true }),
+  maxTradingDays: optionalNumber("Max trading days", { integer: true }),
+  consistencyPercent: optionalNumber("Consistency rule", { max: 100 }),
+  allowWeekendHolding: z.boolean(),
+  allowNewsTrading: z.boolean(),
+  notes: z.string(),
+});
+type RuleForm = z.infer<typeof ruleSchema>;
 
 function defaultForm(timezone: string): RuleForm {
   return {
@@ -91,6 +108,11 @@ const BASIS_LABEL: Record<RuleForm["calculationBasis"], string> = {
   high_water_mark: "High-water mark (trailing peak)",
 };
 
+const BASIS_OPTIONS = (Object.keys(BASIS_LABEL) as RuleForm["calculationBasis"][]).map((value) => ({
+  value,
+  label: BASIS_LABEL[value],
+}));
+
 const EVENT_LABEL: Record<string, string> = {
   daily_loss_warning: "Daily loss warning",
   daily_loss_breach: "Daily loss breach",
@@ -127,96 +149,153 @@ function AllowanceBar({ label, usedLabel, limitLabel, percent }: { label: string
   );
 }
 
+function RuleProfileForm({
+  accountId,
+  initial,
+  hasSavedRules,
+  onSaved,
+  onCancel,
+}: {
+  accountId: string;
+  initial: RuleForm;
+  hasSavedRules: boolean;
+  onSaved: () => void;
+  onCancel: () => void;
+}) {
+  const save = useMutation({
+    mutationFn: upsertPropFirmRules,
+    onSuccess: () => {
+      toast.success("Rule profile saved");
+      onSaved();
+    },
+    onError: (error) => toast.error(error.message || "Couldn't save rule profile"),
+  });
+
+  const form = useAppForm({
+    defaultValues: initial,
+    validators: { onSubmit: ruleSchema },
+    onSubmit: ({ value }) => {
+      const num = (v: string) => (v.trim() === "" ? null : Number(v));
+      save.mutate({
+        data: {
+          accountId,
+          isActive: value.isActive,
+          timezone: value.timezone.trim() || "UTC",
+          calculationBasis: value.calculationBasis,
+          maxDailyLossPercent: Number(value.maxDailyLossPercent),
+          maxTotalDrawdownPercent: Number(value.maxTotalDrawdownPercent),
+          profitTargetPercent: num(value.profitTargetPercent),
+          minTradingDays: num(value.minTradingDays),
+          maxTradingDays: num(value.maxTradingDays),
+          consistencyPercent: num(value.consistencyPercent),
+          allowWeekendHolding: value.allowWeekendHolding,
+          allowNewsTrading: value.allowNewsTrading,
+          notes: value.notes.trim() === "" ? null : value.notes.trim(),
+        },
+      });
+    },
+  });
+
+  return (
+    <form {...formProps(form)} className="surface-panel mb-6 p-6">
+      <p className="panel-heading mb-4">Rule profile</p>
+      <div className="metric-grid mb-4 items-start">
+        <form.AppField name="calculationBasis">
+          {(field) => <field.SelectField label="Calculation basis" options={BASIS_OPTIONS} />}
+        </form.AppField>
+        <form.AppField name="timezone">
+          {(field) => <field.TextField label="Prop firm timezone (IANA)" placeholder="e.g. America/New_York" />}
+        </form.AppField>
+        <form.AppField name="maxDailyLossPercent">
+          {(field) => <field.TextField label="Max daily loss %" type="number" step="0.1" min="0" className="font-mono" />}
+        </form.AppField>
+        <form.AppField name="maxTotalDrawdownPercent">
+          {(field) => <field.TextField label="Max total drawdown %" type="number" step="0.1" min="0" className="font-mono" />}
+        </form.AppField>
+        <form.AppField name="profitTargetPercent">
+          {(field) => <field.TextField label="Profit target % (optional)" type="number" step="0.1" min="0" placeholder="Optional" className="font-mono" />}
+        </form.AppField>
+        <form.AppField name="consistencyPercent">
+          {(field) => (
+            <field.TextField
+              label="Consistency rule % (optional)"
+              type="number"
+              step="1"
+              min="0"
+              max="100"
+              placeholder="Max % of profit from one day"
+              className="font-mono"
+            />
+          )}
+        </form.AppField>
+        <form.AppField name="minTradingDays">
+          {(field) => <field.TextField label="Min trading days (optional)" type="number" step="1" min="0" placeholder="Optional" className="font-mono" />}
+        </form.AppField>
+        <form.AppField name="maxTradingDays">
+          {(field) => <field.TextField label="Max trading days (optional)" type="number" step="1" min="0" placeholder="Optional" className="font-mono" />}
+        </form.AppField>
+      </div>
+
+      <div className="mb-4 flex flex-wrap gap-6 text-sm">
+        <form.AppField name="allowWeekendHolding">{(field) => <field.CheckboxField label="Weekend holding allowed" />}</form.AppField>
+        <form.AppField name="allowNewsTrading">{(field) => <field.CheckboxField label="News-event trading allowed" />}</form.AppField>
+        <form.AppField name="isActive">{(field) => <field.CheckboxField label="Rules currently apply to this account" />}</form.AppField>
+      </div>
+
+      <div className="mb-4">
+        <form.AppField name="notes">
+          {(field) => <field.TextareaField label="Notes (optional)" placeholder="Anything else about this firm's rules worth remembering" />}
+        </form.AppField>
+      </div>
+
+      <div className="flex gap-2">
+        <form.AppForm>
+          <form.SubmitButton pendingLabel="Saving…" pending={save.isPending}>
+            Save rule profile
+          </form.SubmitButton>
+        </form.AppForm>
+        {hasSavedRules && (
+          <Button type="button" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        )}
+      </div>
+    </form>
+  );
+}
+
 function PropRulesPage() {
   const queryClient = useQueryClient();
-  const [isEditing, setIsEditing] = useState(false);
-  const [form, setForm] = useState<RuleForm | null>(null);
-  // Tracks which account `form` currently holds data for. Without this,
-  // switching accounts (the tab row below, or the sidebar's own switcher)
-  // would leave `form` holding the *previous* account's rules — and since
-  // handleSubmit saves using the current accountId, hitting Save after
-  // switching would silently write one account's rule profile onto
-  // another one's. See DECISIONS.md.
-  const [formAccountId, setFormAccountId] = useState<string | null>(null);
-  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
-
-  const workspaceQuery = useQuery({ queryKey: ["workspace"], queryFn: () => getWorkspace() });
-  const workspace = workspaceQuery.data;
+  const navigate = Route.useNavigate();
+  const search = Route.useSearch();
+  const { data: workspace } = useQuery(workspaceQueryOptions);
   const accounts = workspace?.accounts ?? [];
   // Defaults to the sidebar's active account, but stays independently
   // switchable here via the tab row — the whole point of a per-account
   // page is being able to check on one account without changing what the
   // rest of the app (Journal, Analytics) is scoped to.
-  const accountId = selectedAccountId ?? workspace?.activeAccount?.id ?? accounts[0]?.id ?? null;
+  const accountId = search.account ?? workspace?.activeAccount?.id ?? accounts[0]?.id ?? null;
 
-  const overviewQuery = useQuery({
-    queryKey: ["prop-firm-overview", accountId],
-    queryFn: () => getComplianceOverview({ data: { accountId: accountId as string } }),
-    enabled: accountId != null,
-  });
+  const overviewQuery = useQuery(propFirmOverviewQueryOptions(accountId ?? undefined));
   const overview = overviewQuery.data;
 
-  useEffect(() => {
-    if (!workspace || !accountId || overview === undefined) return;
-    if (formAccountId === accountId) return; // already loaded for the currently-selected account
-    if (overview.rules) {
-      setForm(formFromRow(overview.rules));
-      setIsEditing(false);
-    } else {
-      setForm(defaultForm(workspace.profile.timezone));
-      setIsEditing(true);
-    }
-    setFormAccountId(accountId);
-  }, [workspace, overview, accountId, formAccountId]);
+  const setSearch = (patch: { account?: string | undefined; edit?: boolean | undefined }) =>
+    void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
 
-  const saveMutation = useMutation({
-    mutationFn: upsertPropFirmRules,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["prop-firm-overview", accountId] });
-      setIsEditing(false);
-    },
-  });
-
-  function startEdit() {
-    if (overview?.rules) setForm(formFromRow(overview.rules));
-    setIsEditing(true);
-  }
-
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (saveMutation.isPending) return;
-    if (!form || !accountId) return;
-    saveMutation.mutate({
-      data: {
-        accountId,
-        isActive: form.isActive,
-        timezone: form.timezone.trim() || "UTC",
-        calculationBasis: form.calculationBasis,
-        maxDailyLossPercent: Number(form.maxDailyLossPercent),
-        maxTotalDrawdownPercent: Number(form.maxTotalDrawdownPercent),
-        profitTargetPercent: form.profitTargetPercent.trim() === "" ? null : Number(form.profitTargetPercent),
-        minTradingDays: form.minTradingDays.trim() === "" ? null : Number(form.minTradingDays),
-        maxTradingDays: form.maxTradingDays.trim() === "" ? null : Number(form.maxTradingDays),
-        consistencyPercent: form.consistencyPercent.trim() === "" ? null : Number(form.consistencyPercent),
-        allowWeekendHolding: form.allowWeekendHolding,
-        allowNewsTrading: form.allowNewsTrading,
-        notes: form.notes.trim() === "" ? null : form.notes.trim(),
-      },
-    });
-  }
-
-  if (workspaceQuery.isLoading || !workspace) {
+  if (!workspace) {
     return <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>;
   }
 
   const status: ComplianceStatus | null = overview?.status ?? null;
+  // With no saved rules the editor is the page; otherwise it opens on demand.
+  const isEditing = overview !== undefined && (search.edit === true || !overview.rules);
 
   return (
     <>
       <section className="mb-6 flex flex-col justify-between gap-4 border-b border-border pb-5 sm:flex-row sm:items-center">
         <h1 className="page-title">Prop-firm rules</h1>
         {overview?.rules && !isEditing && (
-          <Button variant="outline" onClick={startEdit}>
+          <Button variant="outline" onClick={() => setSearch({ edit: true })}>
             <Pencil /> Edit rule profile
           </Button>
         )}
@@ -230,7 +309,7 @@ function PropRulesPage() {
               type="button"
               variant={account.id === accountId ? "secondary" : "outline"}
               size="sm"
-              onClick={() => setSelectedAccountId(account.id)}
+              onClick={() => setSearch({ account: account.id, edit: undefined })}
             >
               {account.name}
             </Button>
@@ -238,187 +317,19 @@ function PropRulesPage() {
         </div>
       )}
 
-      {!overview?.rules && !isEditing && (
-        <div className="surface-panel p-6 text-center">
-          <ShieldCheck className="mx-auto mb-3 size-8 text-muted-foreground" />
-          <p className="panel-title mb-1">No rule profile set up yet</p>
-          <p className="mb-4 text-sm text-muted-foreground">
-            Add this prop firm's daily loss, drawdown, and profit-target rules to track compliance against this account.
-          </p>
-          <Button onClick={() => setIsEditing(true)}>Set up rule profile</Button>
-        </div>
-      )}
-
-      {isEditing && form && (
-        <form onSubmit={handleSubmit} className="surface-panel mb-6 p-6">
-          <p className="panel-heading mb-4">Rule profile</p>
-          <div className="metric-grid mb-4">
-            <div>
-              <label className="field-label">Calculation basis</label>
-              <Select
-                value={form.calculationBasis}
-                onValueChange={(value) => setForm({ ...form, calculationBasis: value as RuleForm["calculationBasis"] })}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="starting_balance">{BASIS_LABEL.starting_balance}</SelectItem>
-                  <SelectItem value="current_balance">{BASIS_LABEL.current_balance}</SelectItem>
-                  <SelectItem value="high_water_mark">{BASIS_LABEL.high_water_mark}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <label className="field-label" htmlFor="rule-timezone">
-                Prop firm timezone (IANA)
-              </label>
-              <Input
-                id="rule-timezone"
-                placeholder="e.g. America/New_York"
-                value={form.timezone}
-                onChange={(event) => setForm({ ...form, timezone: event.target.value })}
-              />
-            </div>
-            <div>
-              <label className="field-label" htmlFor="rule-daily-loss">
-                Max daily loss %
-              </label>
-              <Input
-                id="rule-daily-loss"
-                type="number"
-                step="0.1"
-                min="0"
-                required
-                className="font-mono"
-                value={form.maxDailyLossPercent}
-                onChange={(event) => setForm({ ...form, maxDailyLossPercent: event.target.value })}
-              />
-            </div>
-            <div>
-              <label className="field-label" htmlFor="rule-drawdown">
-                Max total drawdown %
-              </label>
-              <Input
-                id="rule-drawdown"
-                type="number"
-                step="0.1"
-                min="0"
-                required
-                className="font-mono"
-                value={form.maxTotalDrawdownPercent}
-                onChange={(event) => setForm({ ...form, maxTotalDrawdownPercent: event.target.value })}
-              />
-            </div>
-            <div>
-              <label className="field-label" htmlFor="rule-target">
-                Profit target % (optional)
-              </label>
-              <Input
-                id="rule-target"
-                type="number"
-                step="0.1"
-                min="0"
-                placeholder="Optional"
-                className="font-mono"
-                value={form.profitTargetPercent}
-                onChange={(event) => setForm({ ...form, profitTargetPercent: event.target.value })}
-              />
-            </div>
-            <div>
-              <label className="field-label" htmlFor="rule-consistency">
-                Consistency rule % (optional)
-              </label>
-              <Input
-                id="rule-consistency"
-                type="number"
-                step="1"
-                min="0"
-                max="100"
-                placeholder="Max % of profit from one day"
-                className="font-mono"
-                value={form.consistencyPercent}
-                onChange={(event) => setForm({ ...form, consistencyPercent: event.target.value })}
-              />
-            </div>
-            <div>
-              <label className="field-label" htmlFor="rule-min-days">
-                Min trading days (optional)
-              </label>
-              <Input
-                id="rule-min-days"
-                type="number"
-                step="1"
-                min="0"
-                placeholder="Optional"
-                className="font-mono"
-                value={form.minTradingDays}
-                onChange={(event) => setForm({ ...form, minTradingDays: event.target.value })}
-              />
-            </div>
-            <div>
-              <label className="field-label" htmlFor="rule-max-days">
-                Max trading days (optional)
-              </label>
-              <Input
-                id="rule-max-days"
-                type="number"
-                step="1"
-                min="0"
-                placeholder="Optional"
-                className="font-mono"
-                value={form.maxTradingDays}
-                onChange={(event) => setForm({ ...form, maxTradingDays: event.target.value })}
-              />
-            </div>
-          </div>
-
-          <div className="mb-4 flex flex-wrap gap-6 text-sm">
-            <label className="flex items-center gap-2">
-              <Checkbox
-                checked={form.allowWeekendHolding}
-                onCheckedChange={(checked) => setForm({ ...form, allowWeekendHolding: checked === true })}
-              />
-              Weekend holding allowed
-            </label>
-            <label className="flex items-center gap-2">
-              <Checkbox
-                checked={form.allowNewsTrading}
-                onCheckedChange={(checked) => setForm({ ...form, allowNewsTrading: checked === true })}
-              />
-              News-event trading allowed
-            </label>
-            <label className="flex items-center gap-2">
-              <Checkbox
-                checked={form.isActive}
-                onCheckedChange={(checked) => setForm({ ...form, isActive: checked === true })}
-              />
-              Rules currently apply to this account
-            </label>
-          </div>
-
-          <label className="field-label" htmlFor="rule-notes">
-            Notes (optional)
-          </label>
-          <Textarea
-            id="rule-notes"
-            className="mb-4"
-            placeholder="Anything else about this firm's rules worth remembering"
-            value={form.notes}
-            onChange={(event) => setForm({ ...form, notes: event.target.value })}
-          />
-
-          <div className="flex gap-2">
-            <Button type="submit" disabled={saveMutation.isPending}>
-              {saveMutation.isPending ? "Saving…" : "Save rule profile"}
-            </Button>
-            {overview?.rules && (
-              <Button type="button" variant="ghost" onClick={() => setIsEditing(false)}>
-                Cancel
-              </Button>
-            )}
-          </div>
-        </form>
+      {accountId && overview && isEditing && (
+        <RuleProfileForm
+          // Fresh form per account, so one account's draft can never be saved onto another.
+          key={accountId}
+          accountId={accountId}
+          initial={overview.rules ? formFromRow(overview.rules) : defaultForm(workspace.profile.timezone)}
+          hasSavedRules={Boolean(overview.rules)}
+          onSaved={() => {
+            void queryClient.invalidateQueries({ queryKey: propFirmOverviewQueryOptions(accountId).queryKey });
+            setSearch({ edit: undefined });
+          }}
+          onCancel={() => setSearch({ edit: undefined })}
+        />
       )}
 
       {overview?.rules && !isEditing && status && (

@@ -3,9 +3,8 @@
 // see, at a glance, whether their planned trades are actually outperforming
 // their impulsive ones). Deeper breakdowns by setup/symbol/session/etc. live
 // on the Analytics page (see analytics.tsx and lib/analytics.ts).
-import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -19,10 +18,10 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { getWorkspace } from "@/lib/portfolios.functions";
-import { listTrades, TRADES_LIST_DEFAULT_LIMIT } from "@/lib/trades.functions";
-import { summarizeClosedTrades, type ClosedTradeForAnalytics } from "@/lib/trade-calc";
+import { overviewQueryOptions, workspaceQueryOptions } from "@/lib/queries";
+import { summarizeClosedTrades } from "@/lib/trade-calc";
 import { buildEquityCurve } from "@/lib/equity-curve";
+import { formatMoney, formatSignedMoney, workspaceCurrency } from "@/lib/money";
 import { ComparisonRow, MetricCard } from "@/components/journal/dashboard-widgets";
 import { EquityCurveChart } from "@/components/analytics/EquityCurveChart";
 
@@ -38,80 +37,59 @@ export const Route = createFileRoute("/app/")({
 
 
 function OverviewPage() {
-  const workspaceQuery = useQuery({ queryKey: ["workspace"], queryFn: () => getWorkspace() });
-  const workspace = workspaceQuery.data;
-  const activePortfolioId = workspace?.activePortfolio.id;
-
-  const tradesQuery = useQuery({
-    queryKey: ["trades", activePortfolioId, workspace?.activeAccount?.id, TRADES_LIST_DEFAULT_LIMIT],
-    queryFn: () =>
-      listTrades({
-        data: { portfolioId: activePortfolioId as string, accountId: workspace?.activeAccount?.id, limit: TRADES_LIST_DEFAULT_LIMIT },
-      }),
-    enabled: activePortfolioId != null,
-  });
-  const trades = useMemo(() => tradesQuery.data ?? [], [tradesQuery.data]);
-
-  const closedTrades = useMemo(() => trades.filter((t) => t.status === "closed" && t.net_pnl != null), [trades]);
-  const openTrades = useMemo(() => trades.filter((t) => t.status === "open"), [trades]);
+  const { data: workspace } = useQuery(workspaceQueryOptions);
   const startingEquity = workspace?.startingEquity ?? 50000;
+  const currency = workspace ? workspaceCurrency(workspace) : "USD";
 
-  const analyticsInput: ClosedTradeForAnalytics[] = useMemo(
-    () =>
-      closedTrades.map((t) => ({
-        id: t.id,
-        netPnl: t.net_pnl ?? 0,
-        realizedRMultiple: t.realized_r_multiple,
-        curatedLabel: t.curated_label === "curated" ? "curated" : "impulse",
-        openedAt: t.opened_at,
-        closedAt: t.closed_at,
-      })),
-    [closedTrades],
+  // The server crunches the numbers beside the database and returns one small
+  // report (overview-report.ts), so this page costs the same however many
+  // trades the journal holds.
+  const overviewQuery = useQuery(
+    overviewQueryOptions(
+      workspace
+        ? { portfolioId: workspace.activePortfolio.id, accountId: workspace.activeAccount?.id, startingEquity, currency }
+        : undefined,
+    ),
   );
-  const analytics = useMemo(() => summarizeClosedTrades(analyticsInput, startingEquity), [analyticsInput, startingEquity]);
+  const overview = overviewQuery.data;
+  const analytics = overview?.analytics ?? summarizeClosedTrades([], startingEquity);
+  const equityCurve = overview?.equityCurve ?? buildEquityCurve([], startingEquity, { currency });
+  const closedCount = overview?.closedCount ?? 0;
+  const openCount = overview?.openCount ?? 0;
 
-  const curated = useMemo(() => closedTrades.filter((t) => t.curated_label === "curated"), [closedTrades]);
-  const impulse = useMemo(() => closedTrades.filter((t) => t.curated_label === "impulse"), [closedTrades]);
+  const curated = overview?.curated ?? { count: 0, wins: 0, netPnl: 0 };
+  const impulse = overview?.impulse ?? { count: 0, wins: 0, netPnl: 0 };
   // The "5" threshold below (both here and in the insight banner's JSX) is a
   // fixed teaser value that intentionally matches Analytics' own default
   // minSampleSize (see analytics.tsx) so this dashboard doesn't tease an
   // insight that page wouldn't actually report yet. It's not read from
   // there — Analytics' threshold is user-adjustable and this one isn't —
   // so if that default ever changes, update this to match.
-  const curatedRate = curated.length ? Math.round((curated.filter((t) => (t.net_pnl ?? 0) > 0).length / curated.length) * 100) : 0;
-  const impulseRate = impulse.length ? Math.round((impulse.filter((t) => (t.net_pnl ?? 0) > 0).length / impulse.length) * 100) : 0;
-  const signalScore = closedTrades.length ? Math.min(99, Math.max(1, Math.round(50 + (curatedRate - impulseRate) / 2))) : 0;
+  const curatedRate = curated.count ? Math.round((curated.wins / curated.count) * 100) : 0;
+  const impulseRate = impulse.count ? Math.round((impulse.wins / impulse.count) * 100) : 0;
+  const signalScore = closedCount ? Math.min(99, Math.max(1, Math.round(50 + (curatedRate - impulseRate) / 2))) : 0;
 
-  const equityCurve = useMemo(
-    () =>
-      buildEquityCurve(
-        closedTrades.map((t) => ({ id: t.id, symbol: t.symbol, netPnl: t.net_pnl, openedAt: t.opened_at, closedAt: t.closed_at })),
-        startingEquity,
-      ),
-    [closedTrades, startingEquity],
-  );
+  // Logging streak: consecutive days (ending today) with at least one trade
+  // opened — a habit metric, distinct from win/loss streak. The server sends
+  // when recent trades were opened; "which calendar day is that?" is answered
+  // here, in the person's own local time zone.
+  const daysWithTrades = new Set((overview?.recentOpenedAt ?? []).map((iso) => new Date(iso).toDateString()));
+  let loggingStreak = 0;
+  for (let i = 0; i < 30; i++) {
+    const day = new Date();
+    day.setDate(day.getDate() - i);
+    if (daysWithTrades.has(day.toDateString())) loggingStreak += 1;
+    else if (i > 0) break;
+  }
 
-  // Logging streak: consecutive of the last 14 days with at least one trade opened — a habit metric, distinct from win/loss streak.
-  const loggingStreak = useMemo(() => {
-    const daysWithTrades = new Set(trades.map((t) => new Date(t.opened_at).toDateString()));
-    let streak = 0;
-    for (let i = 0; i < 30; i++) {
-      const day = new Date();
-      day.setDate(day.getDate() - i);
-      if (daysWithTrades.has(day.toDateString())) streak += 1;
-      else if (i > 0) break;
-    }
-    return streak;
-  }, [trades]);
-
-  const openRisk = openTrades.reduce((sum, t) => sum + (t.initial_risk ?? 0), 0);
+  const openRisk = overview?.openRisk ?? 0;
   const activeRiskPercent = workspace?.activeAccount?.default_risk_percent ?? workspace?.accounts[0]?.default_risk_percent ?? 1;
   const riskAllowance = workspace ? workspace.liveEquity * (activeRiskPercent / 100) * 3 : 1000;
   const riskPct = riskAllowance > 0 ? Math.min(100, Math.round((openRisk / riskAllowance) * 100)) : 0;
 
   const profileName = workspace?.profile.display_name || "Trader";
 
-  if (workspaceQuery.isLoading || !workspace) {
+  if (!workspace) {
     return <p className="py-10 text-center text-sm text-muted-foreground">Loading overview…</p>;
   }
 
@@ -134,21 +112,21 @@ function OverviewPage() {
       </section>
 
       <section className="metric-grid" aria-label="Performance summary">
-        {tradesQuery.isLoading ? (
+        {!overview ? (
           <p className="col-span-full py-6 text-center text-sm text-muted-foreground">Loading your numbers…</p>
         ) : (
           <>
         <MetricCard
           label="Net P&L"
-          value={`${analytics.netPnl >= 0 ? "" : "−"}$${Math.abs(analytics.netPnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-          change={`${closedTrades.length} closed`}
-          detail={openTrades.length ? `${openTrades.length} open` : "current journal"}
+          value={formatSignedMoney(analytics.netPnl, currency)}
+          change={`${closedCount} closed`}
+          detail={openCount ? `${openCount} open` : "current journal"}
           positive={analytics.netPnl >= 0}
           icon={<Wallet />}
         />
         <MetricCard
           label="Win rate"
-          value={closedTrades.length ? `${analytics.winRate}%` : "—"}
+          value={closedCount ? `${analytics.winRate}%` : "—"}
           change={analytics.profitFactor === Infinity ? "∞" : analytics.profitFactor ? analytics.profitFactor.toFixed(2) : "—"}
           detail="profit factor"
           positive
@@ -157,8 +135,8 @@ function OverviewPage() {
         <MetricCard
           label="Expectancy"
           value={
-            closedTrades.length
-              ? `${(analytics.expectancy ?? 0) >= 0 ? "+" : "−"}$${Math.abs(analytics.expectancy ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+            closedCount
+              ? formatSignedMoney(analytics.expectancy ?? 0, currency)
               : "—"
           }
           change={`${(analytics.averageRMultiple ?? 0) >= 0 ? "+" : ""}${(analytics.averageRMultiple ?? 0).toFixed(2)}R`}
@@ -184,9 +162,7 @@ function OverviewPage() {
             <div>
               <p className="eyebrow">Equity curve</p>
               <h2 className="panel-title">
-                <span className="font-mono">
-                  ${equityCurve.current.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
+                <span className="font-mono">{formatMoney(equityCurve.current, currency, 2)}</span>
               </h2>
             </div>
             <Link to="/app/analytics" className="text-xs text-muted-foreground hover:text-foreground">
@@ -220,23 +196,23 @@ function OverviewPage() {
             <div>
               <p className="text-sm font-semibold">{curatedRate >= impulseRate ? "Process is paying off" : "Process needs attention"}</p>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                {closedTrades.length ? "Curated trades are compared with impulsive entries." : "Log your first trade to reveal your process signal."}
+                {closedCount ? "Curated trades are compared with impulsive entries." : "Log your first trade to reveal your process signal."}
               </p>
             </div>
           </div>
           <div className="comparison-list">
             <ComparisonRow
               label="Curated"
-              count={curated.length}
+              count={curated.count}
               winRate={curatedRate}
-              result={`$${curated.reduce((sum, t) => sum + (t.net_pnl ?? 0), 0).toLocaleString()}`}
+              result={formatMoney(curated.netPnl, currency)}
               positive
             />
             <ComparisonRow
               label="Impulse"
-              count={impulse.length}
+              count={impulse.count}
               winRate={impulseRate}
-              result={`$${impulse.reduce((sum, t) => sum + (t.net_pnl ?? 0), 0).toLocaleString()}`}
+              result={formatMoney(impulse.netPnl, currency)}
             />
           </div>
         </div>
@@ -257,9 +233,9 @@ function OverviewPage() {
             <div className="flex justify-between text-sm">
               <span className="text-muted-foreground">Open risk</span>
               <span className="font-mono font-semibold">
-                ${openRisk.toLocaleString(undefined, { maximumFractionDigits: 0 })}{" "}
+                {formatMoney(openRisk, currency)}{" "}
                 <span className="text-xs font-normal text-muted-foreground">
-                  / ${riskAllowance.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  / {formatMoney(riskAllowance, currency)}
                 </span>
               </span>
             </div>
@@ -267,7 +243,7 @@ function OverviewPage() {
               <span className="progress-fill" style={{ width: `${riskPct}%` }} />
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              {openTrades.length} open position{openTrades.length === 1 ? "" : "s"}, {riskPct}% of risk allowance
+              {openCount} open position{openCount === 1 ? "" : "s"}, {riskPct}% of risk allowance
               (3× your {activeRiskPercent}% per-trade risk, so roughly three full-risk positions at once)
             </p>
           </div>
@@ -292,7 +268,7 @@ function OverviewPage() {
           <div className="min-w-0 flex-1">
             <p className="eyebrow text-chart-2">Insight</p>
             <p className="mt-1 text-sm font-medium">
-              {curated.length >= 5 && impulse.length >= 5 ? (
+              {curated.count >= 5 && impulse.count >= 5 ? (
                 <>
                   Curated trades win <span className="text-chart-2">{curatedRate}%</span> of the time versus{" "}
                   <span className="text-destructive">{impulseRate}%</span> for impulse entries.

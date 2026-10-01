@@ -12,30 +12,53 @@
 // same check independently (see updateAccount) — this page's check is
 // only there to give an honest disabled state, not the actual guarantee.
 //
-// The JSON export intentionally caps at 500 trades and excludes attachments
+// The JSON export includes every trade and excludes attachments
 // — both limits are stated plainly in the panel's own copy rather than
 // hidden, since a silent partial export would be worse than an honest one.
+//
+// Page state lives in the URL (?section=, ?edit=<accountId>, ?add=portfolio|
+// account) instead of component state, every form is a TanStack Form seeded
+// straight from the loaded workspace (no sync-on-load effect), and the
+// "saved" confirmations are sonner toasts.
+import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Archive, Briefcase, Check, Database as DatabaseIcon, Download, FolderOpen, Layers, Pencil, Plus, User, UserCircle } from "lucide-react";
+import { saveAs } from "file-saver";
+import { Archive, Briefcase, Database as DatabaseIcon, Download, FolderOpen, Layers, Pencil, Plus, User, UserCircle } from "lucide-react";
+import { toast } from "sonner";
+import { z } from "zod";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { archiveAccount, createAccount, setActiveAccount, updateAccount } from "@/lib/accounts.functions";
-import { createPortfolio, getWorkspace, setActivePortfolio, updatePortfolio } from "@/lib/portfolios.functions";
-import { updateProfile } from "@/lib/profile.functions";
-import { listTags } from "@/lib/tags.functions";
-import { listTrades, listTradeTagLinks, TRADES_LIST_DEFAULT_LIMIT } from "@/lib/trades.functions";
 import type { Database } from "@/integrations/supabase/types";
+import { archiveAccount, createAccount, setActiveAccount, updateAccount } from "@/lib/accounts.functions";
+import { formProps, useAppForm } from "@/lib/form";
+import { formatMoney } from "@/lib/money";
+import { createPortfolio, setActivePortfolio, updatePortfolio } from "@/lib/portfolios.functions";
+import { updateProfile } from "@/lib/profile.functions";
+import {
+  queryKeys,
+  tagsQueryOptions,
+  tradeExistsQueryOptions,
+  tradesQueryOptions,
+  tradeTagLinksQueryOptions,
+  workspaceQueryOptions,
+} from "@/lib/queries";
 
 type AccountRow = Database["public"]["Tables"]["accounts"]["Row"];
+
+const SECTION_KEYS = ["profile", "portfolios", "accounts", "data"] as const;
+type SectionKey = (typeof SECTION_KEYS)[number];
 
 export const Route = createFileRoute("/app/settings")({
   head: () => ({
     meta: [{ title: "Settings — Curated Trades" }],
+  }),
+  validateSearch: z.object({
+    section: z.enum(SECTION_KEYS).optional(),
+    /** Account id whose inline editor is open. */
+    edit: z.string().optional(),
+    /** Which "new …" form is open. */
+    add: z.enum(["portfolio", "account"]).optional(),
   }),
   component: SettingsPage,
 });
@@ -59,8 +82,10 @@ const COMMON_TIMEZONES = [
   "Australia/Sydney",
 ];
 
-type AccountType = "personal" | "prop";
-type SectionKey = "profile" | "portfolios" | "accounts" | "data";
+const ACCOUNT_TYPE_OPTIONS = [
+  { value: "personal", label: "Personal", icon: <User /> },
+  { value: "prop", label: "Prop firm", icon: <Briefcase /> },
+] as const;
 
 const SECTIONS: { key: SectionKey; label: string; icon: typeof UserCircle }[] = [
   { key: "profile", label: "Profile", icon: UserCircle },
@@ -69,18 +94,17 @@ const SECTIONS: { key: SectionKey; label: string; icon: typeof UserCircle }[] = 
   { key: "data", label: "Data & export", icon: DatabaseIcon },
 ];
 
-function money(value: number) {
-  return `$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-}
+const positiveNumber = (message: string) =>
+  z.string().refine((value) => Number.isFinite(Number(value)) && Number(value) > 0, message);
+const currencyCode = z.string().trim().length(3, "Use a three-letter code, e.g. USD.");
 
-/** A label-left / control-right row, the layout every traditional journal's settings use. */
-function FormRow({ label, hint, htmlFor, children }: { label: string; hint?: string | undefined; htmlFor?: string | undefined; children: ReactNode }) {
+/** A label-left / control-right row for the read-only rows (the editable
+ * ones get the same layout from the form kit's `layout="row"`). */
+function StaticRow({ label, hint, children }: { label: string; hint?: string | undefined; children: React.ReactNode }) {
   return (
     <div className="form-row">
       <div>
-        <label htmlFor={htmlFor} className="form-row-label">
-          {label}
-        </label>
+        <p className="form-row-label">{label}</p>
         {hint && <p className="form-row-hint">{hint}</p>}
       </div>
       <div className="max-w-md">{children}</div>
@@ -88,120 +112,84 @@ function FormRow({ label, hint, htmlFor, children }: { label: string; hint?: str
   );
 }
 
-function TypeToggle({ value, onChange }: { value: AccountType; onChange: (value: AccountType) => void }) {
-  return (
-    <div className="direction-toggle">
-      <Button type="button" variant={value === "personal" ? "secondary" : "ghost"} size="sm" onClick={() => onChange("personal")}>
-        <User /> Personal
-      </Button>
-      <Button type="button" variant={value === "prop" ? "secondary" : "ghost"} size="sm" onClick={() => onChange("prop")}>
-        <Briefcase /> Prop firm
-      </Button>
-    </div>
-  );
-}
+// ── Account editor (inline, under its table row) ───────────────────────────
+
+const accountEditorSchema = z.object({
+  name: z.string().trim().min(1, "Account name can't be empty"),
+  accountType: z.enum(["personal", "prop"]),
+  riskPercent: z.string().refine((value) => Number(value) > 0 && Number(value) <= 100, "Risk % must be between 0 and 100"),
+  startingEquity: positiveNumber("Starting equity must be a positive number"),
+});
 
 function AccountEditor({ account, onSaved, onCancel }: { account: AccountRow; onSaved: () => void; onCancel: () => void }) {
-  const [name, setName] = useState(account.name);
-  const [accountType, setAccountType] = useState<AccountType>(account.account_type === "prop" ? "prop" : "personal");
-  const [riskPercent, setRiskPercent] = useState(String(account.default_risk_percent));
-  const [startingEquity, setStartingEquity] = useState(String(account.starting_equity));
-  const [notice, setNotice] = useState("");
+  const { data: existingTrades } = useQuery(tradeExistsQueryOptions(account.id, account.portfolio_id));
+  const hasTrades = (existingTrades?.length ?? 0) > 0;
 
-  const tradeExistsQuery = useQuery({
-    queryKey: ["trade-exists", account.id],
-    queryFn: () => listTrades({ data: { portfolioId: account.portfolio_id, accountId: account.id, limit: 1 } }),
-  });
-  const hasTrades = (tradeExistsQuery.data?.length ?? 0) > 0;
-
-  const updateMutation = useMutation({
+  const update = useMutation({
     mutationFn: updateAccount,
     onSuccess: onSaved,
-    onError: (error) => setNotice(error instanceof Error ? error.message : "Couldn't save account"),
+    onError: (error) => toast.error(error.message || "Couldn't save account"),
   });
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const risk = Number(riskPercent);
-    if (!Number.isFinite(risk) || risk <= 0 || risk > 100) {
-      setNotice("Risk % must be between 0 and 100");
-      return;
-    }
-    const trimmedName = name.trim();
-    if (!trimmedName) {
-      setNotice("Account name can't be empty");
-      return;
-    }
-    let equity: number | undefined;
-    if (!hasTrades) {
-      equity = Number(startingEquity);
-      if (!Number.isFinite(equity) || equity <= 0) {
-        setNotice("Starting equity must be a positive number");
-        return;
-      }
-    }
-    updateMutation.mutate({
-      data: {
-        accountId: account.id,
-        name: trimmedName,
-        accountType,
-        defaultRiskPercent: risk,
-        ...(equity != null ? { startingEquity: equity } : {}),
-      },
-    });
-  }
+  const form = useAppForm({
+    defaultValues: {
+      name: account.name,
+      accountType: account.account_type === "prop" ? "prop" : "personal",
+      riskPercent: String(account.default_risk_percent),
+      startingEquity: String(account.starting_equity),
+    } as z.infer<typeof accountEditorSchema>,
+    validators: { onSubmit: accountEditorSchema },
+    onSubmit: ({ value }) =>
+      update.mutate({
+        data: {
+          accountId: account.id,
+          name: value.name.trim(),
+          accountType: value.accountType,
+          defaultRiskPercent: Number(value.riskPercent),
+          // Locked once trades exist — the server enforces it independently.
+          ...(hasTrades ? {} : { startingEquity: Number(value.startingEquity) }),
+        },
+      }),
+  });
 
   return (
-    <form onSubmit={handleSubmit} className="border-t border-border bg-card">
-      {notice && <p className="px-4 pt-3 text-xs text-destructive">{notice}</p>}
-      <FormRow label="Account name" htmlFor={`account-name-${account.id}`}>
-        <Input id={`account-name-${account.id}`} value={name} onChange={(e) => setName(e.target.value)} />
-      </FormRow>
-      <FormRow label="Account type">
-        <TypeToggle value={accountType} onChange={setAccountType} />
-      </FormRow>
-      <FormRow label="Default risk per trade" hint="Percent of equity. Pre-fills the trade form and the risk calculator." htmlFor={`account-risk-${account.id}`}>
-        <div className="flex items-center gap-2">
-          <Input
-            id={`account-risk-${account.id}`}
+    <form {...formProps(form)} className="border-t border-border bg-card">
+      <form.AppField name="name">{(field) => <field.TextField layout="row" label="Account name" />}</form.AppField>
+      <form.AppField name="accountType">
+        {(field) => <field.SegmentedField layout="row" label="Account type" options={ACCOUNT_TYPE_OPTIONS} size="sm" />}
+      </form.AppField>
+      <form.AppField name="riskPercent">
+        {(field) => (
+          <field.TextField
+            layout="row"
+            label="Default risk per trade"
+            hint="Percent of equity. Pre-fills the trade form and the risk calculator."
             type="number"
             step="0.1"
             min="0.1"
             max="100"
             className="w-28"
-            value={riskPercent}
-            onChange={(e) => setRiskPercent(e.target.value)}
-          />
-          <span className="text-muted-foreground">%</span>
-        </div>
-      </FormRow>
-      <FormRow
-        label="Starting equity"
-        hint={
-          hasTrades
-            ? "Locked once an account has logged trades — changing it later would rewrite the equity curve's starting point without touching the trades that reference it."
-            : undefined
-        }
-        htmlFor={`account-equity-${account.id}`}
-      >
-        {hasTrades ? (
-          <p className="font-mono text-[13px] font-semibold leading-8">{money(account.starting_equity)}</p>
-        ) : (
-          <Input
-            id={`account-equity-${account.id}`}
-            type="number"
-            step="any"
-            min="1"
-            className="w-40"
-            value={startingEquity}
-            onChange={(e) => setStartingEquity(e.target.value)}
           />
         )}
-      </FormRow>
+      </form.AppField>
+      {hasTrades ? (
+        <StaticRow
+          label="Starting equity"
+          hint="Locked once an account has logged trades — changing it later would rewrite the equity curve's starting point without touching the trades that reference it."
+        >
+          <p className="font-mono text-[13px] font-semibold leading-8">{formatMoney(account.starting_equity, account.base_currency, 2)}</p>
+        </StaticRow>
+      ) : (
+        <form.AppField name="startingEquity">
+          {(field) => <field.TextField layout="row" label="Starting equity" type="number" step="any" min="1" className="w-40" />}
+        </form.AppField>
+      )}
       <div className="form-actions">
-        <Button type="submit" size="sm" disabled={updateMutation.isPending}>
-          {updateMutation.isPending ? "Saving…" : "Save account"}
-        </Button>
+        <form.AppForm>
+          <form.SubmitButton size="sm" pendingLabel="Saving…" pending={update.isPending}>
+            Save account
+          </form.SubmitButton>
+        </form.AppForm>
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
           Cancel
         </Button>
@@ -210,80 +198,248 @@ function AccountEditor({ account, onSaved, onCancel }: { account: AccountRow; on
   );
 }
 
-function SettingsPage() {
+// ── Profile ────────────────────────────────────────────────────────────────
+
+const profileSchema = z.object({
+  displayName: z.string(),
+  timezone: z.string().min(1),
+  baseCurrency: currencyCode,
+  traderType: z.enum(["day", "scalp", "swing", "position"]),
+});
+
+function ProfileForm() {
   const queryClient = useQueryClient();
-  const workspaceQuery = useQuery({ queryKey: ["workspace"], queryFn: () => getWorkspace() });
-  const workspace = workspaceQuery.data;
-
-  const [displayName, setDisplayName] = useState("");
-  const [timezone, setTimezone] = useState("UTC");
-  const [baseCurrency, setBaseCurrency] = useState("USD");
-  const [traderType, setTraderType] = useState<(typeof TRADER_TYPES)[number]["value"]>("swing");
-  const [portfolioName, setPortfolioName] = useState("");
-  const [notice, setNotice] = useState("");
-  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
-  const [section, setSection] = useState<SectionKey>("profile");
-
-  const [isAddingPortfolio, setIsAddingPortfolio] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newAccountType, setNewAccountType] = useState<AccountType>("personal");
-  const [newCurrency, setNewCurrency] = useState("USD");
-  const [newEquity, setNewEquity] = useState("50000");
-
-  const [isAddingAccount, setIsAddingAccount] = useState(false);
-  const [newAccountName, setNewAccountName] = useState("");
-  const [newAccountType2, setNewAccountType2] = useState<AccountType>("personal");
-  const [newAccountEquity, setNewAccountEquity] = useState("10000");
-
-  useEffect(() => {
-    if (!workspace) return;
-    setDisplayName(workspace.profile.display_name ?? "");
-    setTimezone(workspace.profile.timezone || "UTC");
-    setBaseCurrency(workspace.profile.base_currency || "USD");
-    const validType = TRADER_TYPES.find((t) => t.value === workspace.profile.trader_type);
-    setTraderType(validType?.value ?? "swing");
-    setPortfolioName(workspace.activePortfolio.name);
-  }, [workspace]);
-
-  function showNotice(message: string) {
-    setNotice(message);
-    window.setTimeout(() => setNotice(""), 3000);
-  }
-
-  function invalidateWorkspace() {
-    void queryClient.invalidateQueries({ queryKey: ["workspace"] });
-  }
-
-  const profileMutation = useMutation({
+  const { data: workspace } = useSuspenseQuery(workspaceQueryOptions);
+  const save = useMutation({
     mutationFn: updateProfile,
     onSuccess: () => {
-      invalidateWorkspace();
-      showNotice("Profile saved");
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workspace });
+      toast.success("Profile saved");
     },
-    onError: () => showNotice("Couldn't save profile"),
+    onError: () => toast.error("Couldn't save profile"),
+  });
+  const form = useAppForm({
+    defaultValues: {
+      displayName: workspace.profile.display_name ?? "",
+      timezone: workspace.profile.timezone || "UTC",
+      baseCurrency: workspace.profile.base_currency || "USD",
+      traderType: TRADER_TYPES.find((t) => t.value === workspace.profile.trader_type)?.value ?? "swing",
+    } as z.infer<typeof profileSchema>,
+    validators: { onSubmit: profileSchema },
+    onSubmit: ({ value }) =>
+      save.mutate({
+        data: {
+          displayName: value.displayName.trim() || undefined,
+          timezone: value.timezone,
+          baseCurrency: value.baseCurrency,
+          traderType: value.traderType,
+        },
+      }),
   });
 
-  const portfolioNameMutation = useMutation({
+  return (
+    <form {...formProps(form)} className="surface-panel overflow-hidden p-0">
+      <div className="panel-bar">
+        <h2 className="panel-title">Profile</h2>
+      </div>
+      <form.AppField name="displayName">{(field) => <field.TextField layout="row" label="Display name" />}</form.AppField>
+      <form.AppField name="timezone">
+        {(field) => (
+          <field.SelectField
+            layout="row"
+            label="Timezone"
+            hint="Used to bucket trades into days and sessions."
+            options={COMMON_TIMEZONES.map((tz) => ({ value: tz, label: tz }))}
+          />
+        )}
+      </form.AppField>
+      <form.AppField
+        name="baseCurrency"
+        listeners={{ onChange: ({ value, fieldApi }) => fieldApi.setValue(value.toUpperCase(), { dontUpdateMeta: true }) }}
+      >
+        {(field) => (
+          <field.TextField layout="row" label="Base currency" hint="Three-letter code, e.g. USD." className="w-28 uppercase" maxLength={3} />
+        )}
+      </form.AppField>
+      <form.AppField name="traderType">
+        {(field) => <field.SelectField layout="row" label="Trader type" options={TRADER_TYPES} />}
+      </form.AppField>
+      <div className="form-actions">
+        <form.AppForm>
+          <form.SubmitButton size="sm" pendingLabel="Saving…" pending={save.isPending}>
+            Save profile
+          </form.SubmitButton>
+        </form.AppForm>
+      </div>
+    </form>
+  );
+}
+
+// ── Portfolios ─────────────────────────────────────────────────────────────
+
+const renameSchema = z.object({ name: z.string().trim().min(1, "Portfolio name can't be empty") });
+
+function RenamePortfolioForm({ portfolioId, currentName }: { portfolioId: string; currentName: string }) {
+  const queryClient = useQueryClient();
+  const rename = useMutation({
     mutationFn: updatePortfolio,
     onSuccess: () => {
-      invalidateWorkspace();
-      showNotice("Portfolio renamed");
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workspace });
+      toast.success("Portfolio renamed");
     },
-    onError: () => showNotice("Couldn't rename portfolio"),
+    onError: () => toast.error("Couldn't rename portfolio"),
   });
+  const form = useAppForm({
+    defaultValues: { name: currentName },
+    validators: { onSubmit: renameSchema },
+    onSubmit: ({ value }) => rename.mutate({ data: { portfolioId, name: value.name.trim() } }),
+  });
+  return (
+    <form {...formProps(form)} className="surface-panel overflow-hidden p-0">
+      <div className="panel-bar">
+        <h2 className="panel-title">Rename current portfolio</h2>
+      </div>
+      <form.AppField name="name">{(field) => <field.TextField layout="row" label="Portfolio name" />}</form.AppField>
+      <div className="form-actions">
+        <form.AppForm>
+          <form.SubmitButton size="sm" pending={rename.isPending}>
+            <Pencil /> Rename
+          </form.SubmitButton>
+        </form.AppForm>
+      </div>
+    </form>
+  );
+}
 
-  const createPortfolioMutation = useMutation({
-    mutationFn: createPortfolio,
-    onSuccess: async (created) => {
+const newPortfolioSchema = z.object({
+  name: z.string().trim().min(1, "Give the new portfolio a name"),
+  currency: currencyCode,
+  accountType: z.enum(["personal", "prop"]),
+  equity: positiveNumber("Starting equity must be a positive number"),
+});
+
+function NewPortfolioForm({ onDone }: { onDone: () => void }) {
+  const queryClient = useQueryClient();
+  const create = useMutation({
+    mutationFn: async (input: Parameters<typeof createPortfolio>[0]) => {
+      const created = await createPortfolio(input);
       await setActivePortfolio({ data: { portfolioId: created.id } });
-      invalidateWorkspace();
-      setIsAddingPortfolio(false);
-      setNewName("");
-      setNewEquity("50000");
-      showNotice(`"${created.name}" created and switched to it`);
+      return created;
     },
-    onError: () => showNotice("Couldn't create portfolio"),
+    onSuccess: (created) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workspace });
+      toast.success(`"${created.name}" created and switched to it`);
+      onDone();
+    },
+    onError: () => toast.error("Couldn't create portfolio"),
   });
+  const form = useAppForm({
+    defaultValues: { name: "", currency: "USD", accountType: "personal", equity: "50000" } as z.infer<typeof newPortfolioSchema>,
+    validators: { onSubmit: newPortfolioSchema },
+    onSubmit: ({ value }) =>
+      create.mutate({
+        data: { name: value.name.trim(), accountType: value.accountType, baseCurrency: value.currency, startingEquity: Number(value.equity) },
+      }),
+  });
+  return (
+    <form {...formProps(form)} className="surface-panel overflow-hidden p-0">
+      <div className="panel-bar">
+        <h2 className="panel-title">New portfolio</h2>
+      </div>
+      <form.AppField name="name">{(field) => <field.TextField layout="row" label="Name" />}</form.AppField>
+      <form.AppField
+        name="currency"
+        listeners={{ onChange: ({ value, fieldApi }) => fieldApi.setValue(value.toUpperCase(), { dontUpdateMeta: true }) }}
+      >
+        {(field) => <field.TextField layout="row" label="Currency" className="w-28 uppercase" maxLength={3} />}
+      </form.AppField>
+      <form.AppField name="accountType">
+        {(field) => <field.SegmentedField layout="row" label="First account's type" options={ACCOUNT_TYPE_OPTIONS} size="sm" />}
+      </form.AppField>
+      <form.AppField name="equity">
+        {(field) => (
+          <field.TextField layout="row" label="First account's starting equity" type="number" step="any" min="1" className="w-40" />
+        )}
+      </form.AppField>
+      <div className="form-actions">
+        <form.AppForm>
+          <form.SubmitButton size="sm" pendingLabel="Creating…" pending={create.isPending}>
+            Create portfolio
+          </form.SubmitButton>
+        </form.AppForm>
+        <Button type="button" variant="ghost" size="sm" onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+// ── Accounts ───────────────────────────────────────────────────────────────
+
+const newAccountSchema = z.object({
+  name: z.string().trim().min(1, "Give the new account a name"),
+  accountType: z.enum(["personal", "prop"]),
+  equity: positiveNumber("Starting equity must be a positive number"),
+});
+
+function NewAccountForm({ portfolioId, onDone }: { portfolioId: string; onDone: () => void }) {
+  const queryClient = useQueryClient();
+  const create = useMutation({
+    mutationFn: createAccount,
+    onSuccess: (created) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workspace });
+      toast.success(`"${created.name}" account created`);
+      onDone();
+    },
+    onError: () => toast.error("Couldn't create account"),
+  });
+  const form = useAppForm({
+    defaultValues: { name: "", accountType: "personal", equity: "10000" } as z.infer<typeof newAccountSchema>,
+    validators: { onSubmit: newAccountSchema },
+    onSubmit: ({ value }) =>
+      create.mutate({
+        data: { portfolioId, name: value.name.trim(), accountType: value.accountType, startingEquity: Number(value.equity) },
+      }),
+  });
+  return (
+    <form {...formProps(form)} className="surface-panel overflow-hidden p-0">
+      <div className="panel-bar">
+        <h2 className="panel-title">New account</h2>
+      </div>
+      <form.AppField name="name">{(field) => <field.TextField layout="row" label="Name" />}</form.AppField>
+      <form.AppField name="accountType">
+        {(field) => <field.SegmentedField layout="row" label="Account type" options={ACCOUNT_TYPE_OPTIONS} size="sm" />}
+      </form.AppField>
+      <form.AppField name="equity">
+        {(field) => <field.TextField layout="row" label="Starting equity" type="number" step="any" min="1" className="w-40" />}
+      </form.AppField>
+      <div className="form-actions">
+        <form.AppForm>
+          <form.SubmitButton size="sm" pendingLabel="Creating…" pending={create.isPending}>
+            Create account
+          </form.SubmitButton>
+        </form.AppForm>
+        <Button type="button" variant="ghost" size="sm" onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+// ── Page ───────────────────────────────────────────────────────────────────
+
+function SettingsPage() {
+  const queryClient = useQueryClient();
+  const navigate = Route.useNavigate();
+  const search = Route.useSearch();
+  const section = search.section ?? "profile";
+  const { data: workspace } = useSuspenseQuery(workspaceQueryOptions);
+
+  const invalidateWorkspace = () => queryClient.invalidateQueries({ queryKey: queryKeys.workspace });
+  const setSearch = (patch: { section?: SectionKey | undefined; edit?: string | undefined; add?: "portfolio" | "account" | undefined }) =>
+    void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
 
   const switchPortfolioMutation = useMutation({
     mutationFn: (portfolioId: string) => setActivePortfolio({ data: { portfolioId } }),
@@ -291,127 +447,55 @@ function SettingsPage() {
   });
 
   const switchAccountMutation = useMutation({
-    mutationFn: (accountId: string | null) => setActiveAccount({ data: { portfolioId: workspace!.activePortfolio.id, accountId } }),
+    mutationFn: (accountId: string | null) => setActiveAccount({ data: { portfolioId: workspace.activePortfolio.id, accountId } }),
     onSuccess: invalidateWorkspace,
-  });
-
-  const createAccountMutation = useMutation({
-    mutationFn: createAccount,
-    onSuccess: (created) => {
-      invalidateWorkspace();
-      setIsAddingAccount(false);
-      setNewAccountName("");
-      setNewAccountEquity("10000");
-      showNotice(`"${created.name}" account created`);
-    },
-    onError: () => showNotice("Couldn't create account"),
   });
 
   const archiveAccountMutation = useMutation({
     mutationFn: archiveAccount,
     onSuccess: () => {
-      invalidateWorkspace();
-      showNotice("Account archived");
+      void invalidateWorkspace();
+      toast.success("Account archived");
     },
-    onError: () => showNotice("Couldn't archive account"),
+    onError: () => toast.error("Couldn't archive account"),
   });
 
   const exportMutation = useMutation({
     mutationFn: async () => {
-      if (!workspace) throw new Error("Workspace not loaded");
-
+      const portfolioId = workspace.activePortfolio.id;
+      // Through the query cache: reuses whatever the Journal already loaded.
       const [trades, tagLinks, tags] = await Promise.all([
-        listTrades({ data: { portfolioId: workspace.activePortfolio.id, limit: TRADES_LIST_DEFAULT_LIMIT } }),
-        listTradeTagLinks({ data: { portfolioId: workspace.activePortfolio.id } }),
-        listTags(),
+        queryClient.fetchQuery(tradesQueryOptions(portfolioId, undefined)),
+        queryClient.fetchQuery(tradeTagLinksQueryOptions(portfolioId)),
+        queryClient.fetchQuery(tagsQueryOptions),
       ]);
 
       const tagNameById = new Map(tags.map((tag) => [tag.id, tag.name]));
-      const tagIdsByTrade = new Map<string, string[]>();
+      const tagNamesByTrade = new Map<string, string[]>();
       for (const link of tagLinks) {
-        const list = tagIdsByTrade.get(link.trade_id) ?? [];
-        list.push(tagNameById.get(link.tag_id) ?? link.tag_id);
-        tagIdsByTrade.set(link.trade_id, list);
+        tagNamesByTrade.set(link.trade_id, [
+          ...(tagNamesByTrade.get(link.trade_id) ?? []),
+          tagNameById.get(link.tag_id) ?? link.tag_id,
+        ]);
       }
 
       const payload = {
         exportedAt: new Date().toISOString(),
         profile: workspace.profile,
         portfolios: workspace.portfolios,
-        activePortfolioId: workspace.activePortfolio.id,
+        activePortfolioId: portfolioId,
         accounts: workspace.accounts,
         tags,
-        trades: trades.map((trade) => ({ ...trade, tags: tagIdsByTrade.get(trade.id) ?? [] })),
+        trades: trades.map((trade) => ({ ...trade, tags: tagNamesByTrade.get(trade.id) ?? [] })),
       };
-
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `curated-trades-export-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
+      saveAs(
+        new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+        `curated-trades-export-${new Date().toISOString().slice(0, 10)}.json`,
+      );
     },
-    onSuccess: () => showNotice("Export downloaded"),
-    onError: () => showNotice("Couldn't build export"),
+    onSuccess: () => toast.success("Export downloaded"),
+    onError: () => toast.error("Couldn't build export"),
   });
-
-  function onSaveProfile(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    profileMutation.mutate({
-      data: { displayName: displayName.trim() || undefined, timezone, baseCurrency, traderType },
-    });
-  }
-
-  function onRenamePortfolio(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!workspace) return;
-    const name = portfolioName.trim();
-    if (!name) {
-      showNotice("Portfolio name can't be empty");
-      return;
-    }
-    portfolioNameMutation.mutate({ data: { portfolioId: workspace.activePortfolio.id, name } });
-  }
-
-  function onCreatePortfolio(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const name = newName.trim();
-    const equity = Number(newEquity);
-    if (!name) {
-      showNotice("Give the new portfolio a name");
-      return;
-    }
-    if (!Number.isFinite(equity) || equity <= 0) {
-      showNotice("Starting equity must be a positive number");
-      return;
-    }
-    createPortfolioMutation.mutate({ data: { name, accountType: newAccountType, baseCurrency: newCurrency, startingEquity: equity } });
-  }
-
-  function onCreateAccount(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!workspace) return;
-    const name = newAccountName.trim();
-    const equity = Number(newAccountEquity);
-    if (!name) {
-      showNotice("Give the new account a name");
-      return;
-    }
-    if (!Number.isFinite(equity) || equity <= 0) {
-      showNotice("Starting equity must be a positive number");
-      return;
-    }
-    createAccountMutation.mutate({
-      data: { portfolioId: workspace.activePortfolio.id, name, accountType: newAccountType2, startingEquity: equity },
-    });
-  }
-
-  if (workspaceQuery.isLoading || !workspace) {
-    return <p className="py-10 text-center text-sm text-muted-foreground">Loading settings…</p>;
-  }
 
   const activeAccountId = workspace.activeAccount?.id ?? null;
 
@@ -429,7 +513,7 @@ function SettingsPage() {
               key={item.key}
               type="button"
               className={`section-nav-item ${section === item.key ? "section-nav-item-active" : ""}`}
-              onClick={() => setSection(item.key)}
+              onClick={() => setSearch({ section: item.key, edit: undefined, add: undefined })}
               aria-current={section === item.key ? "page" : undefined}
             >
               <item.icon />
@@ -439,60 +523,15 @@ function SettingsPage() {
         </nav>
 
         <div className="min-w-0 space-y-5">
-          {section === "profile" && (
-            <form onSubmit={onSaveProfile} className="surface-panel overflow-hidden p-0">
-              <div className="panel-bar">
-                <h2 className="panel-title">Profile</h2>
-              </div>
-              <FormRow label="Display name" htmlFor="settings-name">
-                <Input id="settings-name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-              </FormRow>
-              <FormRow label="Timezone" hint="Used to bucket trades into days and sessions.">
-                <Select value={timezone} onValueChange={setTimezone}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {COMMON_TIMEZONES.map((tz) => (
-                      <SelectItem key={tz} value={tz}>
-                        {tz}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </FormRow>
-              <FormRow label="Base currency" hint="Three-letter code, e.g. USD." htmlFor="settings-currency">
-                <Input id="settings-currency" className="w-28 uppercase" value={baseCurrency} maxLength={3} onChange={(e) => setBaseCurrency(e.target.value.toUpperCase())} />
-              </FormRow>
-              <FormRow label="Trader type">
-                <Select value={traderType} onValueChange={(v: (typeof TRADER_TYPES)[number]["value"]) => setTraderType(v)}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {TRADER_TYPES.map((type) => (
-                      <SelectItem key={type.value} value={type.value}>
-                        {type.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </FormRow>
-              <div className="form-actions">
-                <Button type="submit" size="sm" disabled={profileMutation.isPending}>
-                  {profileMutation.isPending ? "Saving…" : "Save profile"}
-                </Button>
-              </div>
-            </form>
-          )}
+          {section === "profile" && <ProfileForm />}
 
           {section === "portfolios" && (
             <>
               <div className="surface-panel overflow-hidden p-0">
                 <div className="panel-bar">
                   <h2 className="panel-title">Portfolios</h2>
-                  {!isAddingPortfolio && (
-                    <Button type="button" variant="outline" size="sm" onClick={() => setIsAddingPortfolio(true)}>
+                  {search.add !== "portfolio" && (
+                    <Button type="button" variant="outline" size="sm" onClick={() => setSearch({ add: "portfolio" })}>
                       <Plus /> New portfolio
                     </Button>
                   )}
@@ -534,47 +573,14 @@ function SettingsPage() {
                 </div>
               </div>
 
-              <form onSubmit={onRenamePortfolio} className="surface-panel overflow-hidden p-0">
-                <div className="panel-bar">
-                  <h2 className="panel-title">Rename current portfolio</h2>
-                </div>
-                <FormRow label="Portfolio name" htmlFor="settings-portfolio-name">
-                  <Input id="settings-portfolio-name" value={portfolioName} onChange={(e) => setPortfolioName(e.target.value)} />
-                </FormRow>
-                <div className="form-actions">
-                  <Button type="submit" size="sm" disabled={portfolioNameMutation.isPending}>
-                    <Pencil /> Rename
-                  </Button>
-                </div>
-              </form>
+              {/* Keyed so switching portfolios re-seeds the field. */}
+              <RenamePortfolioForm
+                key={workspace.activePortfolio.id}
+                portfolioId={workspace.activePortfolio.id}
+                currentName={workspace.activePortfolio.name}
+              />
 
-              {isAddingPortfolio && (
-                <form onSubmit={onCreatePortfolio} className="surface-panel overflow-hidden p-0">
-                  <div className="panel-bar">
-                    <h2 className="panel-title">New portfolio</h2>
-                  </div>
-                  <FormRow label="Name" htmlFor="new-portfolio-name">
-                    <Input id="new-portfolio-name" value={newName} onChange={(e) => setNewName(e.target.value)} />
-                  </FormRow>
-                  <FormRow label="Currency" htmlFor="new-portfolio-currency">
-                    <Input id="new-portfolio-currency" className="w-28 uppercase" value={newCurrency} maxLength={3} onChange={(e) => setNewCurrency(e.target.value.toUpperCase())} />
-                  </FormRow>
-                  <FormRow label="First account's type">
-                    <TypeToggle value={newAccountType} onChange={setNewAccountType} />
-                  </FormRow>
-                  <FormRow label="First account's starting equity" htmlFor="new-portfolio-equity">
-                    <Input id="new-portfolio-equity" type="number" step="any" min="1" className="w-40" value={newEquity} onChange={(e) => setNewEquity(e.target.value)} />
-                  </FormRow>
-                  <div className="form-actions">
-                    <Button type="submit" size="sm" disabled={createPortfolioMutation.isPending}>
-                      {createPortfolioMutation.isPending ? "Creating…" : "Create portfolio"}
-                    </Button>
-                    <Button type="button" variant="ghost" size="sm" onClick={() => setIsAddingPortfolio(false)}>
-                      Cancel
-                    </Button>
-                  </div>
-                </form>
-              )}
+              {search.add === "portfolio" && <NewPortfolioForm onDone={() => setSearch({ add: undefined })} />}
             </>
           )}
 
@@ -583,8 +589,8 @@ function SettingsPage() {
               <div className="surface-panel overflow-hidden p-0">
                 <div className="panel-bar">
                   <h2 className="panel-title">Accounts in "{workspace.activePortfolio.name}"</h2>
-                  {!isAddingAccount && (
-                    <Button type="button" variant="outline" size="sm" onClick={() => setIsAddingAccount(true)}>
+                  {search.add !== "account" && (
+                    <Button type="button" variant="outline" size="sm" onClick={() => setSearch({ add: "account" })}>
                       <Plus /> New account
                     </Button>
                   )}
@@ -623,7 +629,7 @@ function SettingsPage() {
                       </tr>
                       {workspace.accounts.flatMap((account) => {
                         const isCurrent = account.id === activeAccountId;
-                        const isEditing = editingAccountId === account.id;
+                        const isEditing = search.edit === account.id;
                         const rows = [
                           <tr key={account.id}>
                             <td className="font-medium">{account.name}</td>
@@ -633,7 +639,7 @@ function SettingsPage() {
                               </Badge>
                             </td>
                             <td className="num font-mono">{account.default_risk_percent}%</td>
-                            <td className="num font-mono">{money(account.starting_equity)}</td>
+                            <td className="num font-mono">{formatMoney(account.starting_equity, account.base_currency)}</td>
                             <td>{isCurrent ? <Badge>Current</Badge> : <span className="text-muted-foreground">—</span>}</td>
                             <td className="num">
                               <div className="flex items-center justify-end gap-1">
@@ -648,7 +654,7 @@ function SettingsPage() {
                                   size="icon"
                                   aria-label="Edit account"
                                   title="Edit account"
-                                  onClick={() => setEditingAccountId(isEditing ? null : account.id)}
+                                  onClick={() => setSearch({ edit: isEditing ? undefined : account.id })}
                                 >
                                   <Pencil className="size-3.5" />
                                 </Button>
@@ -678,11 +684,11 @@ function SettingsPage() {
                               <td colSpan={6} className="!whitespace-normal !bg-card !p-0">
                                 <AccountEditor
                                   account={account}
-                                  onCancel={() => setEditingAccountId(null)}
+                                  onCancel={() => setSearch({ edit: undefined })}
                                   onSaved={() => {
-                                    invalidateWorkspace();
-                                    setEditingAccountId(null);
-                                    showNotice("Account saved");
+                                    void invalidateWorkspace();
+                                    setSearch({ edit: undefined });
+                                    toast.success("Account saved");
                                   }}
                                 />
                               </td>
@@ -696,29 +702,8 @@ function SettingsPage() {
                 </div>
               </div>
 
-              {isAddingAccount && (
-                <form onSubmit={onCreateAccount} className="surface-panel overflow-hidden p-0">
-                  <div className="panel-bar">
-                    <h2 className="panel-title">New account</h2>
-                  </div>
-                  <FormRow label="Name" htmlFor="new-account-name">
-                    <Input id="new-account-name" value={newAccountName} onChange={(e) => setNewAccountName(e.target.value)} />
-                  </FormRow>
-                  <FormRow label="Account type">
-                    <TypeToggle value={newAccountType2} onChange={setNewAccountType2} />
-                  </FormRow>
-                  <FormRow label="Starting equity" htmlFor="new-account-equity">
-                    <Input id="new-account-equity" type="number" step="any" min="1" className="w-40" value={newAccountEquity} onChange={(e) => setNewAccountEquity(e.target.value)} />
-                  </FormRow>
-                  <div className="form-actions">
-                    <Button type="submit" size="sm" disabled={createAccountMutation.isPending}>
-                      {createAccountMutation.isPending ? "Creating…" : "Create account"}
-                    </Button>
-                    <Button type="button" variant="ghost" size="sm" onClick={() => setIsAddingAccount(false)}>
-                      Cancel
-                    </Button>
-                  </div>
-                </form>
+              {search.add === "account" && (
+                <NewAccountForm portfolioId={workspace.activePortfolio.id} onDone={() => setSearch({ add: undefined })} />
               )}
             </>
           )}
@@ -728,33 +713,26 @@ function SettingsPage() {
               <div className="panel-bar">
                 <h2 className="panel-title">Data & export</h2>
               </div>
-              <FormRow
+              <StaticRow
                 label="Full export (JSON)"
-                hint={`Profile, portfolios, accounts, tags and up to the ${TRADES_LIST_DEFAULT_LIMIT} most recent trades in this portfolio. Uploaded attachments (screenshots) aren't included.`}
+                hint="Profile, portfolios, accounts, tags and every trade in this portfolio. Uploaded attachments (screenshots) aren't included."
               >
                 <Button type="button" variant="outline" size="sm" onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}>
                   <Download /> {exportMutation.isPending ? "Preparing…" : "Download JSON"}
                 </Button>
-              </FormRow>
-              <FormRow label="Filtered CSV export" hint="Export a filtered set of trades from the Journal.">
+              </StaticRow>
+              <StaticRow label="Filtered CSV export" hint="Export a filtered set of trades from the Journal.">
                 <Link to="/app/journal" className="text-[13px] font-medium text-primary hover:underline">
                   Open the Journal
                 </Link>
-              </FormRow>
-              <FormRow label="Delete account" hint="Account deletion is planned for a later phase — reach out directly if you need it.">
+              </StaticRow>
+              <StaticRow label="Delete account" hint="Account deletion is planned for a later phase — reach out directly if you need it.">
                 <span className="text-[13px] text-muted-foreground">Not available yet</span>
-              </FormRow>
+              </StaticRow>
             </div>
           )}
         </div>
       </div>
-
-      {notice && (
-        <div className="toast-message">
-          <Check className="size-4 text-chart-2" />
-          {notice}
-        </div>
-      )}
     </>
   );
 }

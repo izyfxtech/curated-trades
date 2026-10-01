@@ -4,32 +4,42 @@
 // savePlaybook() on the server actually works (delete-all-then-reinsert for
 // an edit), which is simpler and correct here because checklist items have
 // no independent identity worth preserving across an edit.
+//
+// A TanStack Form: the checklist is an array field, so add / remove / reorder
+// are the form's own pushValue / removeValue / moveValue rather than
+// hand-written splice helpers.
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { z } from "zod";
 
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PlaybookAttachmentsPanel } from "@/components/playbooks/PlaybookAttachmentsPanel";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { formProps, useAppForm } from "@/lib/form";
 import type { PlaybookWithChecklist } from "@/lib/playbooks.functions";
 
-export interface ChecklistDraftItem {
-  prompt: string;
-  isRequired: boolean;
-}
+const playbookSchema = z.object({
+  name: z.string().trim().min(1, "Give the playbook a name"),
+  market: z.enum(["forex", "crypto"]),
+  direction: z.enum(["long", "short", "both"]),
+  description: z.string(),
+  idealConditions: z.string(),
+  invalidationRules: z.string(),
+  checklistItems: z.array(z.object({ prompt: z.string(), isRequired: z.boolean() })),
+});
 
-export interface PlaybookFormValues {
-  name: string;
-  market: "forex" | "crypto";
-  direction: "long" | "short" | "both";
-  description: string;
-  idealConditions: string;
-  invalidationRules: string;
-  checklistItems: ChecklistDraftItem[];
-}
+export type PlaybookFormValues = z.infer<typeof playbookSchema>;
+export type ChecklistDraftItem = PlaybookFormValues["checklistItems"][number];
+
+const MARKET_OPTIONS = [
+  { value: "forex", label: "Forex" },
+  { value: "crypto", label: "Crypto" },
+] as const;
+
+const DIRECTION_OPTIONS = [
+  { value: "long", label: "Long" },
+  { value: "short", label: "Short" },
+  { value: "both", label: "Both" },
+] as const;
 
 function toFormValues(playbook: PlaybookWithChecklist | null): PlaybookFormValues {
   if (!playbook) {
@@ -67,44 +77,19 @@ export function PlaybookEditorModal({
   onClose: () => void;
   onSave: (values: PlaybookFormValues) => void;
 }) {
-  const [values, setValues] = useState<PlaybookFormValues>(() => toFormValues(playbook));
-  const patch = (partial: Partial<PlaybookFormValues>) => setValues({ ...values, ...partial });
-
-  function addChecklistItem() {
-    patch({ checklistItems: [...values.checklistItems, { prompt: "", isRequired: true }] });
-  }
-
-  function updateChecklistItem(index: number, partial: Partial<ChecklistDraftItem>) {
-    patch({
-      checklistItems: values.checklistItems.map((item, i) => (i === index ? { ...item, ...partial } : item)),
-    });
-  }
-
-  function removeChecklistItem(index: number) {
-    patch({ checklistItems: values.checklistItems.filter((_, i) => i !== index) });
-  }
-
-  function moveChecklistItem(index: number, direction: -1 | 1) {
-    const target = index + direction;
-    if (target < 0 || target >= values.checklistItems.length) return;
-    const next = [...values.checklistItems];
-    const [moved] = next.splice(index, 1);
-    if (!moved) return;
-    next.splice(target, 0, moved);
-    patch({ checklistItems: next });
-  }
-
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!values.name.trim()) return;
-    onSave({
-      ...values,
-      name: values.name.trim(),
-      checklistItems: values.checklistItems
-        .map((item) => ({ ...item, prompt: item.prompt.trim() }))
-        .filter((item) => item.prompt.length > 0),
-    });
-  }
+  const form = useAppForm({
+    defaultValues: toFormValues(playbook),
+    validators: { onSubmit: playbookSchema },
+    onSubmit: ({ value }) =>
+      onSave({
+        ...value,
+        name: value.name.trim(),
+        // Blank checklist rows are dropped rather than saved as empty prompts.
+        checklistItems: value.checklistItems
+          .map((item) => ({ ...item, prompt: item.prompt.trim() }))
+          .filter((item) => item.prompt.length > 0),
+      }),
+  });
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -112,150 +97,101 @@ export function PlaybookEditorModal({
         <DialogHeader>
           <DialogTitle id="playbook-editor-title">{playbook ? "Edit playbook" : "New playbook"}</DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSubmit} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6">
-          <div>
-            <label htmlFor="playbook-name" className="field-label">
-              Name
-            </label>
-            <Input
-              id="playbook-name"
-              value={values.name}
-              onChange={(e) => patch({ name: e.target.value })}
-              placeholder="e.g. London breakout retest"
-              required
-            />
-          </div>
+        <form {...formProps(form)} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6">
+          <form.AppField name="name">
+            {(field) => <field.TextField label="Name" placeholder="e.g. London breakout retest" />}
+          </form.AppField>
 
           <div className="grid grid-cols-2 gap-4">
-            <div>
-              <span className="field-label">Market</span>
-              <Select value={values.market} onValueChange={(v: "forex" | "crypto") => patch({ market: v })}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="forex">Forex</SelectItem>
-                  <SelectItem value="crypto">Crypto</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <span className="field-label">Direction</span>
-              <Select
-                value={values.direction}
-                onValueChange={(v: "long" | "short" | "both") => patch({ direction: v })}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="long">Long</SelectItem>
-                  <SelectItem value="short">Short</SelectItem>
-                  <SelectItem value="both">Both</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            <form.AppField name="market">
+              {(field) => <field.SelectField label="Market" options={MARKET_OPTIONS} />}
+            </form.AppField>
+            <form.AppField name="direction">
+              {(field) => <field.SelectField label="Direction" options={DIRECTION_OPTIONS} />}
+            </form.AppField>
           </div>
 
-          <div>
-            <label htmlFor="playbook-description" className="field-label">
-              Description
-            </label>
-            <Textarea
-              id="playbook-description"
-              value={values.description}
-              onChange={(e) => patch({ description: e.target.value })}
-              rows={2}
-              placeholder="What is this setup, in a sentence or two?"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="playbook-ideal" className="field-label">
-              Ideal conditions
-            </label>
-            <Textarea
-              id="playbook-ideal"
-              value={values.idealConditions}
-              onChange={(e) => patch({ idealConditions: e.target.value })}
-              rows={2}
-              placeholder="Session, volatility, structure — what has to be true for this to be a good example?"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="playbook-invalidation" className="field-label">
-              Invalidation rules
-            </label>
-            <Textarea
-              id="playbook-invalidation"
-              value={values.invalidationRules}
-              onChange={(e) => patch({ invalidationRules: e.target.value })}
-              rows={2}
-              placeholder="What proves this setup is no longer valid?"
-            />
-          </div>
-
-          <div>
-            <div className="mb-2 flex items-center justify-between">
-              <span className="field-label mb-0">Pre-trade checklist</span>
-              <Button type="button" variant="ghost" size="sm" onClick={addChecklistItem}>
-                <Plus className="size-3.5" /> Add item
-              </Button>
-            </div>
-            {values.checklistItems.length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                No checklist items yet. Add the questions you want to answer before every trade using this playbook.
-              </p>
+          <form.AppField name="description">
+            {(field) => <field.TextareaField label="Description" rows={2} placeholder="What is this setup, in a sentence or two?" />}
+          </form.AppField>
+          <form.AppField name="idealConditions">
+            {(field) => (
+              <field.TextareaField
+                label="Ideal conditions"
+                rows={2}
+                placeholder="Session, volatility, structure — what has to be true for this to be a good example?"
+              />
             )}
-            <div className="space-y-2">
-              {values.checklistItems.map((item, index) => (
-                <div key={index} className="flex items-start gap-2">
-                  <Input
-                    value={item.prompt}
-                    onChange={(e) => updateChecklistItem(index, { prompt: e.target.value })}
-                    placeholder="e.g. Is price above the 50 EMA on the 4H?"
-                  />
-                  <label className="flex items-center gap-1 whitespace-nowrap pt-2 text-xs text-muted-foreground">
-                    <Checkbox
-                      checked={item.isRequired}
-                      onCheckedChange={(checked) => updateChecklistItem(index, { isRequired: checked === true })}
-                    />
-                    Required
-                  </label>
+          </form.AppField>
+          <form.AppField name="invalidationRules">
+            {(field) => (
+              <field.TextareaField label="Invalidation rules" rows={2} placeholder="What proves this setup is no longer valid?" />
+            )}
+          </form.AppField>
+
+          <form.Field name="checklistItems" mode="array">
+            {(items) => (
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="field-label mb-0">Pre-trade checklist</span>
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
-                    aria-label="Move up"
-                    onClick={() => moveChecklistItem(index, -1)}
-                    disabled={index === 0}
+                    size="sm"
+                    onClick={() => items.pushValue({ prompt: "", isRequired: true })}
                   >
-                    <ArrowUp className="size-3.5" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Move down"
-                    onClick={() => moveChecklistItem(index, 1)}
-                    disabled={index === values.checklistItems.length - 1}
-                  >
-                    <ArrowDown className="size-3.5" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Remove item"
-                    onClick={() => removeChecklistItem(index)}
-                  >
-                    <Trash2 className="size-3.5 text-destructive" />
+                    <Plus className="size-3.5" /> Add item
                   </Button>
                 </div>
-              ))}
-            </div>
-          </div>
+                {items.state.value.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    No checklist items yet. Add the questions you want to answer before every trade using this playbook.
+                  </p>
+                )}
+                <div className="space-y-2">
+                  {items.state.value.map((_, index) => (
+                    <div key={index} className="flex items-start gap-2">
+                      <div className="flex-1">
+                        <form.AppField name={`checklistItems[${index}].prompt`}>
+                          {(field) => <field.TextField placeholder="e.g. Is price above the 50 EMA on the 4H?" />}
+                        </form.AppField>
+                      </div>
+                      <form.AppField name={`checklistItems[${index}].isRequired`}>
+                        {(field) => (
+                          <div className="pt-2 text-xs text-muted-foreground">
+                            <field.CheckboxField label="Required" />
+                          </div>
+                        )}
+                      </form.AppField>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label="Move up"
+                        onClick={() => items.moveValue(index, index - 1)}
+                        disabled={index === 0}
+                      >
+                        <ArrowUp className="size-3.5" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label="Move down"
+                        onClick={() => items.moveValue(index, index + 1)}
+                        disabled={index === items.state.value.length - 1}
+                      >
+                        <ArrowDown className="size-3.5" />
+                      </Button>
+                      <Button type="button" variant="ghost" size="icon" aria-label="Remove item" onClick={() => items.removeValue(index)}>
+                        <Trash2 className="size-3.5 text-destructive" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </form.Field>
 
           {playbook && <PlaybookAttachmentsPanel playbookId={playbook.id} userId={userId} />}
 
@@ -263,9 +199,11 @@ export function PlaybookEditorModal({
             <Button type="button" variant="outline" className="flex-1" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" className="flex-1" disabled={isSubmitting || !values.name.trim()}>
-              {isSubmitting ? "Saving…" : playbook ? "Save changes" : "Create playbook"}
-            </Button>
+            <form.AppForm>
+              <form.SubmitButton className="flex-1" pendingLabel="Saving…" pending={isSubmitting}>
+                {playbook ? "Save changes" : "Create playbook"}
+              </form.SubmitButton>
+            </form.AppForm>
           </div>
         </form>
       </DialogContent>

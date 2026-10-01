@@ -17,7 +17,9 @@ export default defineConfig({
     // via their own adapters. Switch presets here if deploying to Cloudflare
     // Workers etc. — see https://nitro.build/deploy for the full list.
     nitro(),
-    viteReact(),
+    // React Compiler (Rust port) memoizes automatically, which is what lets
+    // the codebase drop hand-written useMemo/useCallback.
+    viteReact({ compiler: true }),
   ],
   resolve: {
     // Reads the "paths" mapping straight from tsconfig.json (the @/* alias) —

@@ -4,68 +4,122 @@
 // and confidence score all funnel through here regardless of whether the
 // trade started as a manual entry or a converted trade idea (see
 // playbooks.tsx's "Convert to trade" action).
-import { createFileRoute, Outlet, useChildMatches, useNavigate } from "@tanstack/react-router";
+//
+// All of this page's UI state lives in the URL, via the route's typed search
+// params, rather than in component state:
+//   ?q= &outcome= &label= &status= &tagIds= &screenshots= &reviewState= &from= &to= …
+//                                      the filters (shareable, and what the
+//                                      Analytics P&L calendar deep-links to)
+//   ?sort=result&dir=asc  ?page=3&size=100   sort column and page
+//   ?view=gallery                      table vs gallery
+//   ?new=true                          the log-trade modal (the app bar's quick action)
+//   ?edit=<id>                         that trade's edit modal (from the detail page)
+//   ?import=true                       the CSV import modal
+// so refresh, back/forward and copy-link all behave, and there is no
+// "open the modal from an effect, then strip the param" dance.
+//
+// Scale: the list is NOT loaded into the browser and filtered there. The
+// database filters, sorts and slices (listTradesPage), TanStack Table renders
+// the page it is handed and owns the sort/page UI state, and TanStack Query
+// caches each (filters, sort, page) combination — so the Journal is complete
+// and fast whether it holds 50 trades or 50,000.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Check, Download, Images, Plus, Search, Table2, Upload, X } from "lucide-react";
+import { createFileRoute, Outlet, redirect, useChildMatches } from "@tanstack/react-router";
+import { functionalUpdate, type PaginationState, type SortingState, type Updater } from "@tanstack/react-table";
+import { Download, Images, Plus, Table2, Upload } from "lucide-react";
+import { toast } from "sonner";
 import { z } from "zod";
 
-import { Button } from "@/components/ui/button";
-import { DateRangePicker } from "@/components/ui/date-range-picker";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { getWorkspace } from "@/lib/portfolios.functions";
-import {
-  createTrade,
-  deleteTrade,
-  listTradeTagLinks,
-  listTrades,
-  TRADES_LIST_DEFAULT_LIMIT,
-  updateTrade,
-  type TradeInput,
-} from "@/lib/trades.functions";
-import { createTag, listTags } from "@/lib/tags.functions";
-import { listAttachmentsForPortfolio, listAttachmentTradeIds } from "@/lib/attachments.functions";
-import { listPlaybooks } from "@/lib/playbooks.functions";
-import { emptyTradeForm, LogTradeModal, type TradeForm } from "@/components/journal/LogTradeModal";
 import { uploadTradeScreenshot } from "@/components/journal/AttachmentsPanel";
-import { displaySize, isLegacyUnitQuantity } from "@/lib/instruments";
 import { CsvImportModal } from "@/components/journal/CsvImportModal";
+import { JournalFilters } from "@/components/journal/JournalFilters";
+import { JournalPager, JournalTable, type JournalTableMeta } from "@/components/journal/JournalTable";
+import { LogTradeModal } from "@/components/journal/LogTradeModal";
 import { TradeGallery } from "@/components/journal/TradeGallery";
-import { TradeRow } from "@/components/journal/dashboard-widgets";
-import type { Database } from "@/integrations/supabase/types";
+import { Button } from "@/components/ui/button";
+import { downloadCsv } from "@/lib/csv";
+import { displaySize } from "@/lib/instruments";
+import { currencyByAccountId } from "@/lib/money";
+import {
+  attachmentsForTradesQueryOptions,
+  playbooksQueryOptions,
+  queryKeys,
+  tagsQueryOptions,
+  tradeDetailQueryOptions,
+  tradesPageQueryOptions,
+  workspaceQueryOptions,
+} from "@/lib/queries";
+import { createTag } from "@/lib/tags.functions";
+import { buildTradeInput, type TradeFormValues } from "@/lib/trade-form";
+import {
+  DEFAULT_TRADE_PAGE_SIZE,
+  TRADE_SORT_COLUMNS,
+  tradeFilterSchema,
+  tradeSortSchema,
+  type TradeFilters,
+  type TradeSortKey,
+} from "@/lib/trade-filters";
+import { createTrade, deleteTrade, listTradesPage, updateTrade, type TradePageRow } from "@/lib/trades.functions";
 
-type TradeRowData = Database["public"]["Tables"]["trades"]["Row"];
-type TagRowData = Database["public"]["Tables"]["tags"]["Row"];
+const journalSearchSchema = tradeFilterSchema.merge(tradeSortSchema).extend({
+  /** 1-based, so the URL reads like the page the person is on. */
+  page: z.number().int().min(1).optional(),
+  size: z.union([z.literal(25), z.literal(50), z.literal(100), z.literal(200)]).optional(),
+  view: z.enum(["table", "gallery"]).optional(),
+  new: z.boolean().optional(),
+  edit: z.string().uuid().optional(),
+  import: z.boolean().optional(),
+});
+
+/** Every filter key set to "no filter", so applying a new set of filters also
+ * removes the ones that were just cleared. */
+const NO_FILTERS: Required<{ [K in keyof TradeFilters]: undefined }> = {
+  q: undefined,
+  status: undefined,
+  outcome: undefined,
+  label: undefined,
+  direction: undefined,
+  session: undefined,
+  market: undefined,
+  playbookId: undefined,
+  tagIds: undefined,
+  tagMode: undefined,
+  screenshots: undefined,
+  reviewState: undefined,
+  from: undefined,
+  to: undefined,
+};
 
 export const Route = createFileRoute("/app/journal")({
   head: () => ({
     meta: [
       { title: "Journal — Curated Trades" },
-      { name: "description", content: "Every trade you've logged: add, edit, tag, and review in one place." },
+      { name: "description", content: "Every trade you've logged: filter, sort, tag, and review in one place." },
     ],
   }),
-  // `?new=true` opens a blank entry (the app bar's global quick action).
-  // `?edit=<id>` opens that trade's edit modal directly — used by the
-  // trade detail page's Edit button ("/app/journal/$tradeId"), since that
-  // page is read-focused and doesn't duplicate this modal's form/mutation
-  // logic itself. `?from=`/`?to=` seed the date filter — used by the P&L
-  // heatmap so clicking a day lands here already filtered to it. All three
-  // are one-shot: consumed on mount, then stripped from the URL.
-  validateSearch: z.object({
-    new: z.boolean().optional(),
-    edit: z.string().uuid().optional(),
-    from: z.string().optional(),
-    to: z.string().optional(),
-  }),
+  validateSearch: journalSearchSchema,
+  // `?edit=<id>` only makes sense for a trade in the *active* portfolio. If it
+  // isn't (a stale link, a deleted trade, or the portfolio was switched), say
+  // so and drop the param — decided here in the loader, once the trade is
+  // loaded, instead of in a component effect.
+  loaderDeps: ({ search }) => ({ edit: search.edit }),
+  loader: async ({ context, deps }) => {
+    if (!deps.edit) return;
+    const [workspace, trade] = await Promise.all([
+      context.queryClient.ensureQueryData(workspaceQueryOptions),
+      context.queryClient.ensureQueryData(tradeDetailQueryOptions(deps.edit)).catch(() => null),
+    ]);
+    if (!trade || trade.portfolio_id !== workspace.activePortfolio.id) {
+      toast("That trade isn't in the current portfolio");
+      throw redirect({ to: "/app/journal", search: (prev) => ({ ...prev, edit: undefined }) });
+    }
+  },
   component: JournalLayout,
 });
 
 // "/app/journal/$tradeId" is a *child* of this route in the generated route
 // tree, so this component has to render an <Outlet /> for the detail page to
-// appear at all — before this wrapper existed the URL changed on a row click
-// but the list kept rendering, which read as "the trade detail page doesn't
-// show up". The list lives in its own component so its hooks/queries only run
+// appear at all. The list lives in its own component so its queries only run
 // while the list is actually on screen.
 function JournalLayout() {
   const childMatches = useChildMatches();
@@ -75,590 +129,360 @@ function JournalLayout() {
 
 function JournalListPage() {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
+  const navigate = Route.useNavigate();
   const search = Route.useSearch();
+  const viewMode = search.view ?? "table";
+  const pageIndex = (search.page ?? 1) - 1;
+  const pageSize = search.size ?? DEFAULT_TRADE_PAGE_SIZE;
 
-  const workspaceQuery = useQuery({ queryKey: ["workspace"], queryFn: () => getWorkspace() });
-  const workspace = workspaceQuery.data;
+  const { data: workspace } = useQuery(workspaceQueryOptions);
   const activePortfolioId = workspace?.activePortfolio.id;
-  const [viewMode, setViewMode] = useState<"table" | "gallery">("table");
-
-  const tradesQuery = useQuery({
-    queryKey: ["trades", activePortfolioId, workspace?.activeAccount?.id, TRADES_LIST_DEFAULT_LIMIT],
-    queryFn: () =>
-      listTrades({
-        data: {
-          portfolioId: activePortfolioId as string,
-          accountId: workspace?.activeAccount?.id,
-          limit: TRADES_LIST_DEFAULT_LIMIT,
-        },
-      }),
-    enabled: activePortfolioId != null,
+  const { data: allTags = [] } = useQuery(tagsQueryOptions);
+  const { data: activePlaybooks = [] } = useQuery({
+    ...playbooksQueryOptions,
+    select: (playbooks) => playbooks.filter((playbook) => playbook.status === "active"),
   });
-  const trades = useMemo(() => tradesQuery.data ?? [], [tradesQuery.data]);
 
-  const tagsQuery = useQuery({ queryKey: ["tags"], queryFn: () => listTags() });
-  const allTags = tagsQuery.data ?? [];
+  // ── What the URL says to show ───────────────────────────────────────────
+  const filters: TradeFilters = {
+    q: search.q,
+    status: search.status,
+    outcome: search.outcome,
+    label: search.label,
+    direction: search.direction,
+    session: search.session,
+    market: search.market,
+    playbookId: search.playbookId,
+    tagIds: search.tagIds,
+    tagMode: search.tagMode,
+    screenshots: search.screenshots,
+    reviewState: search.reviewState,
+    from: search.from,
+    to: search.to,
+  };
+  const sortKey: TradeSortKey = search.sort ?? "opened";
+  const sorting: SortingState = [{ id: sortKey, desc: search.dir !== "asc" }];
+  const pagination: PaginationState = { pageIndex, pageSize };
 
-  const playbooksQuery = useQuery({ queryKey: ["playbooks"], queryFn: () => listPlaybooks() });
-  const activePlaybooks = useMemo(
-    () => (playbooksQuery.data ?? []).filter((playbook) => playbook.status === "active"),
-    [playbooksQuery.data],
+  const baseParams = workspace
+    ? {
+        portfolioId: workspace.activePortfolio.id,
+        accountId: workspace.activeAccount?.id,
+        ...filters,
+        sort: search.sort,
+        dir: search.dir,
+      }
+    : undefined;
+
+  // The gallery is, by definition, trades that have screenshots — so ask the
+  // database for exactly those, and every page is full of them.
+  const pageQuery = useQuery(
+    tradesPageQueryOptions(
+      baseParams && {
+        ...baseParams,
+        screenshots: viewMode === "gallery" ? "with" : filters.screenshots,
+        page: pageIndex,
+        pageSize,
+      },
+    ),
   );
+  const rows = pageQuery.data?.rows;
+  const total = pageQuery.data?.total ?? 0;
 
-  const tradeTagLinksQuery = useQuery({
-    queryKey: ["trade-tag-links", activePortfolioId],
-    queryFn: () => listTradeTagLinks({ data: { portfolioId: activePortfolioId as string } }),
-    enabled: activePortfolioId != null,
-  });
-  const attachmentTradeIdsQuery = useQuery({
-    queryKey: ["attachment-counts", activePortfolioId],
-    queryFn: () => listAttachmentTradeIds({ data: { portfolioId: activePortfolioId as string } }),
-    enabled: activePortfolioId != null,
-  });
+  const galleryTradeIds = viewMode === "gallery" && rows ? rows.map((trade) => trade.id) : [];
+  const galleryQuery = useQuery(attachmentsForTradesQueryOptions(galleryTradeIds));
 
-  // Only fetched in gallery mode — the full attachment rows (with signed
-  // URLs) are heavier than the count-only query above, which table mode
-  // already covers via attachmentTradeIdsQuery.
-  const galleryAttachmentsQuery = useQuery({
-    queryKey: ["attachments-gallery", activePortfolioId],
-    queryFn: () => listAttachmentsForPortfolio({ data: { portfolioId: activePortfolioId as string } }),
-    enabled: activePortfolioId != null && viewMode === "gallery",
-  });
+  const tagsById = new Map(allTags.map((tag) => [tag.id, tag]));
+  const currencyMap = currencyByAccountId(workspace?.accounts ?? []);
 
-  const tagsById = useMemo(() => new Map(allTags.map((tag) => [tag.id, tag])), [allTags]);
-  const tagsByTradeId = useMemo(() => {
-    const map = new Map<string, TagRowData[]>();
-    for (const link of tradeTagLinksQuery.data ?? []) {
-      const tag = tagsById.get(link.tag_id);
-      if (!tag) continue;
-      const existing = map.get(link.trade_id) ?? [];
-      existing.push(tag);
-      map.set(link.trade_id, existing);
-    }
-    return map;
-  }, [tradeTagLinksQuery.data, tagsById]);
-  const attachmentCountByTradeId = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const row of attachmentTradeIdsQuery.data ?? []) {
-      map.set(row.trade_id, (map.get(row.trade_id) ?? 0) + 1);
-    }
-    return map;
-  }, [attachmentTradeIdsQuery.data]);
+  const setSearch = (patch: Partial<z.input<typeof journalSearchSchema>>) =>
+    void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
+
+  const setFilters = (next: TradeFilters) => setSearch({ ...NO_FILTERS, ...next, page: undefined });
+
+  function onSortingChange(updater: Updater<SortingState>) {
+    const next = functionalUpdate(updater, sorting)[0];
+    const isDefault = !next || (next.id === "opened" && next.desc);
+    setSearch({
+      sort: isDefault ? undefined : (next.id as TradeSortKey),
+      dir: isDefault || next.desc ? undefined : "asc",
+      page: undefined,
+    });
+  }
+
+  function onPaginationChange(updater: Updater<PaginationState>) {
+    const next = functionalUpdate(updater, pagination);
+    const sizeChanged = next.pageSize !== pageSize;
+    setSearch({
+      size: next.pageSize === DEFAULT_TRADE_PAGE_SIZE ? undefined : (next.pageSize as 25 | 50 | 100 | 200),
+      page: sizeChanged || next.pageIndex === 0 ? undefined : next.pageIndex + 1,
+    });
+  }
+
+  // ── Modals (URL-driven) ─────────────────────────────────────────────────
+  // The edit modal's trade is fetched by id (the loader already warmed it),
+  // not looked up in a list — the trade may not be on the page being shown.
+  const { data: editingTrade = null } = useQuery({ ...tradeDetailQueryOptions(search.edit ?? ""), enabled: Boolean(search.edit) });
+  const isLogOpen = Boolean(search.new) || (Boolean(search.edit) && editingTrade != null);
+
+  const closeModals = () => setSearch({ new: undefined, edit: undefined, import: undefined });
+
+  function invalidateTrades() {
+    // Prefix match: refreshes the open Journal page, the all-trades list the
+    // other screens use, and anything else keyed under this portfolio's trades.
+    void queryClient.invalidateQueries({ queryKey: queryKeys.trades(activePortfolioId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.tradeTagLinks() });
+  }
 
   const createTagMutation = useMutation({
     mutationFn: createTag,
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["tags"] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.tags }),
   });
-  async function onCreateTag(name: string): Promise<TagRowData> {
-    return createTagMutation.mutateAsync({ data: { name } });
-  }
-
-  const [isLogOpen, setIsLogOpen] = useState(false);
-  // Screenshots picked in the "Log a trade" form before the trade exists; uploaded once it is saved.
-  const [pendingScreenshots, setPendingScreenshots] = useState<File[]>([]);
-  const [editingIsLegacyUnits, setEditingIsLegacyUnits] = useState(false);
-  const [isImportOpen, setIsImportOpen] = useState(false);
-  const [editingTrade, setEditingTrade] = useState<TradeRowData | null>(null);
-  const [notice, setNotice] = useState("");
-  const [form, setForm] = useState<TradeForm>(emptyTradeForm);
-
-  // Filters: client-side over the already-fetched (up to 500) trades. Every
-  // list, count, and export below reads `filteredTrades`, never `trades`
-  // directly, so "what you see is what you export" always holds — a
-  // filtered CSV export is part of Phase 2.5's plan requirement, not just a
-  // UI nicety.
-  const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | TradeRowData["status"]>("all");
-  const [labelFilter, setLabelFilter] = useState<"all" | "curated" | "impulse">("all");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-
-  const filtersActive =
-    searchQuery.trim() !== "" || statusFilter !== "all" || labelFilter !== "all" || dateFrom !== "" || dateTo !== "";
-
-  function clearFilters() {
-    setSearchQuery("");
-    setStatusFilter("all");
-    setLabelFilter("all");
-    setDateFrom("");
-    setDateTo("");
-  }
-
-  const filteredTrades = useMemo(() => {
-    const query = searchQuery.trim().toUpperCase();
-    const fromTime = dateFrom ? new Date(dateFrom).getTime() : null;
-    // Include the entire "to" day rather than cutting off at midnight.
-    const toTime = dateTo ? new Date(dateTo).getTime() + 24 * 60 * 60 * 1000 - 1 : null;
-
-    return trades.filter((trade) => {
-      if (query && !trade.symbol.toUpperCase().includes(query)) return false;
-      if (statusFilter !== "all" && trade.status !== statusFilter) return false;
-      if (labelFilter !== "all" && trade.curated_label !== labelFilter) return false;
-      const openedTime = new Date(trade.opened_at).getTime();
-      if (fromTime != null && openedTime < fromTime) return false;
-      if (toTime != null && openedTime > toTime) return false;
-      return true;
-    });
-  }, [trades, searchQuery, statusFilter, labelFilter, dateFrom, dateTo]);
-
-  function showNotice(message: string, ms = 3000) {
-    setNotice(message);
-    window.setTimeout(() => setNotice(""), ms);
-  }
-
-  function invalidateTrades() {
-    void queryClient.invalidateQueries({ queryKey: ["trades", activePortfolioId] });
-    void queryClient.invalidateQueries({ queryKey: ["trade-tag-links"] });
-  }
 
   const saveTradeMutation = useMutation({
-    mutationFn: async (input: { tradeId?: string; payload: TradeInput }): Promise<TradeRowData[]> => {
-      if (input.tradeId) {
-        const updated = await updateTrade({ data: { ...input.payload, tradeId: input.tradeId } });
-        return [updated];
+    mutationFn: async ({ values, tradeId }: { values: TradeFormValues; tradeId?: string }): Promise<void> => {
+      if (!workspace) throw new Error("Workspace not loaded yet");
+      const payload = buildTradeInput(values, {
+        portfolioId: workspace.activePortfolio.id,
+        editingTrade,
+        playbooks: activePlaybooks,
+      });
+      if (tradeId) {
+        await updateTrade({ data: { ...payload, tradeId } });
+        void queryClient.invalidateQueries({ queryKey: tradeDetailQueryOptions(tradeId).queryKey });
+        return;
       }
       // Single-account entry today (LogTradeModal has one account field);
       // createTrade itself supports several accounts sharing one setup —
       // see its own comment for why — this just isn't wired to a multi-
       // select in the UI yet.
-      const { accountId, ...rest } = input.payload;
+      const { accountId, ...rest } = payload;
       const created = await createTrade({ data: { ...rest, accountIds: [accountId] } });
       // Attach staged screenshots to every trade row the create produced. A
       // failed upload must not lose the trade itself, so it's reported
-      // separately below instead of failing the whole save.
-      const userId = workspace?.profile.user_id;
-      if (userId && pendingScreenshots.length > 0) {
+      // separately instead of failing the whole save.
+      const userId = workspace.profile.user_id;
+      if (values.pendingScreenshots.length > 0) {
         const results = await Promise.allSettled(
           created.flatMap((trade) =>
-            pendingScreenshots.map((file) => uploadTradeScreenshot({ tradeId: trade.id, userId, file })),
+            values.pendingScreenshots.map((file) => uploadTradeScreenshot({ tradeId: trade.id, userId, file })),
           ),
         );
         if (results.some((result) => result.status === "rejected")) {
-          window.setTimeout(() => showNotice("Trade saved, but some screenshots failed to upload — open it to retry", 6000), 0);
+          toast.warning("Trade saved, but some screenshots failed to upload — open it to retry", { duration: 6000 });
         }
-        void queryClient.invalidateQueries({ queryKey: ["attachment-counts"] });
-        void queryClient.invalidateQueries({ queryKey: ["attachments"] });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.attachments() });
       }
-      return created;
     },
     onSuccess: (_result, variables) => {
       invalidateTrades();
-      showNotice(variables.tradeId ? "Trade updated" : "Trade saved to your journal");
-      setIsLogOpen(false);
-      setEditingTrade(null);
-      setPendingScreenshots([]);
-      setForm(emptyTradeForm);
+      toast.success(variables.tradeId ? "Trade updated" : "Trade saved to your journal");
+      closeModals();
     },
     onError: (error) =>
-      showNotice(
-        error instanceof Error && error.message ? `Trade could not be saved: ${error.message}` : "Trade could not be saved",
-        6000,
-      ),
+      toast.error(error.message ? `Trade could not be saved: ${error.message}` : "Trade could not be saved", {
+        duration: 6000,
+      }),
   });
 
   const deleteTradeMutation = useMutation({
     mutationFn: (tradeId: string) => deleteTrade({ data: { tradeId } }),
     onSuccess: () => {
       invalidateTrades();
-      showNotice("Trade deleted");
+      toast.success("Trade deleted");
     },
-    onError: () => showNotice("Trade could not be deleted"),
+    onError: () => toast.error("Trade could not be deleted"),
   });
 
-  function openNewTrade() {
-    setEditingTrade(null);
-    setPendingScreenshots([]);
-    setEditingIsLegacyUnits(false);
-    setForm({ ...emptyTradeForm, accountId: workspace?.activeAccount?.id ?? workspace?.accounts[0]?.id ?? null });
-    setIsLogOpen(true);
-  }
+  // Exports EVERYTHING that matches the current filters and sort, not just the
+  // page on screen: it walks the server's pages (1,000 at a time) until done.
+  const exportMutation = useMutation({
+    mutationFn: async () => {
+      if (!baseParams) throw new Error("Workspace not loaded yet");
+      const all: TradePageRow[] = [];
+      for (let page = 0; ; page++) {
+        const result = await listTradesPage({ data: { ...baseParams, page, pageSize: 1000 } });
+        all.push(...result.rows);
+        if (result.rows.length === 0 || all.length >= result.total) break;
+      }
+      downloadCsv(
+        `curated-trades-${new Date().toISOString().slice(0, 10)}.csv`,
+        [
+          "symbol", "market", "direction", "status", "opened_at", "closed_at", "entry_price", "exit_price",
+          "quantity", "size_unit", "stop_loss", "take_profit", "fees", "net_pnl", "r_multiple", "curated_label", "session", "notes",
+        ],
+        all.map((trade) => [
+          trade.symbol, trade.market, trade.direction, trade.status, trade.opened_at, trade.closed_at,
+          trade.entry_price, trade.exit_price, displaySize(trade).value, displaySize(trade).unit, trade.stop_loss, trade.take_profit,
+          trade.fees, trade.net_pnl, trade.realized_r_multiple ?? trade.planned_r_multiple, trade.curated_label, trade.session, trade.notes,
+        ]),
+      );
+      return all.length;
+    },
+    onSuccess: (count) => toast.success(`Exported ${count.toLocaleString()} trade${count === 1 ? "" : "s"} as CSV`),
+    onError: (error) => toast.error(error.message || "Export failed"),
+  });
 
-  // Opened via the "Log trade" quick action in the app bar (see app.tsx),
-  // which links here with ?new=true rather than duplicating this modal's
-  // form/mutation logic at the shell level. Clears the param right after so
-  // refreshing the page, or coming back via browser history, doesn't
-  // silently reopen the modal.
-  useEffect(() => {
-    if (!search.new) return;
-    openNewTrade();
-    void navigate({ to: "/app/journal", search: {}, replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search.new]);
+  const filtersActive = Object.values(filters).some((value) => (Array.isArray(value) ? value.length > 0 : Boolean(value)));
 
-  // ?edit=<id> — waits for this portfolio's trades to load before looking
-  // the id up. If it's not found (e.g. it belongs to a different
-  // portfolio than the one currently active), says so rather than
-  // silently doing nothing.
-  useEffect(() => {
-    if (!search.edit || trades.length === 0) return;
-    const target = trades.find((trade) => trade.id === search.edit);
-    if (target) {
-      openEditTrade(target);
-    } else {
-      showNotice("That trade isn't in the current portfolio");
-    }
-    void navigate({ to: "/app/journal", search: {}, replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search.edit, trades]);
+  const tableMeta: JournalTableMeta = {
+    tagsById,
+    currencyByAccountId: currencyMap,
+    deletingTradeId: deleteTradeMutation.isPending ? (deleteTradeMutation.variables ?? null) : null,
+    onOpen: (trade) => void navigate({ to: "/app/journal/$tradeId", params: { tradeId: trade.id } }),
+    onEdit: (trade) => setSearch({ edit: trade.id }),
+    onDelete: (trade) => {
+      if (window.confirm(`Delete this ${trade.symbol} trade? This can't be undone.`)) deleteTradeMutation.mutate(trade.id);
+    },
+  };
 
-  // ?from=/?to= — seeds the date filter (used by the Analytics P&L
-  // calendar so clicking a day lands here already filtered to it), then
-  // clears from the URL like the other one-shot params above.
-  useEffect(() => {
-    if (!search.from && !search.to) return;
-    if (search.from) setDateFrom(search.from);
-    if (search.to) setDateTo(search.to);
-    void navigate({ to: "/app/journal", search: {}, replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search.from, search.to]);
-
-  function openEditTrade(trade: TradeRowData) {
-    setEditingTrade(trade);
-    setForm({
-      accountId: trade.account_id,
-      symbol: trade.symbol,
-      direction: trade.direction === "short" ? "short" : "long",
-      status:
-        trade.status === "open" || trade.status === "cancelled" || trade.status === "incomplete"
-          ? trade.status
-          : "closed",
-      entryPrice: String(trade.entry_price),
-      exitPrice: trade.exit_price == null ? "" : String(trade.exit_price),
-      // Show lots (converting pre-lots "units" rows) so the edit form matches the new size field.
-      quantity: String(displaySize(trade).value),
-      quoteRate: trade.quote_rate != null ? String(trade.quote_rate) : "",
-      stopLoss: trade.stop_loss == null ? "" : String(trade.stop_loss),
-      takeProfit: trade.take_profit == null ? "" : String(trade.take_profit),
-      fees: String(trade.fees),
-      notes: trade.notes ?? "",
-      isPlanned: trade.curated_label === "curated",
-      disciplineScore: trade.discipline_score ?? 3,
-      confidence: trade.confidence ?? 3,
-      playbookId: trade.playbook_id,
-      checklistAnswers:
-        trade.playbook_snapshot && typeof trade.playbook_snapshot === "object" && "answers" in trade.playbook_snapshot
-          ? ((trade.playbook_snapshot as { answers?: Record<string, boolean> }).answers ?? {})
-          : {},
-      tagIds: (tagsByTradeId.get(trade.id) ?? []).map((tag) => tag.id),
-    });
-    setEditingIsLegacyUnits(
-      isLegacyUnitQuantity({ symbol: trade.symbol, quantity: trade.quantity, calculationVersion: trade.calculation_version }),
-    );
-    setIsLogOpen(true);
-  }
-
-  function submitTrade(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!activePortfolioId) return;
-
-    if (!form.accountId) {
-      showNotice("Choose which account this trade belongs to");
-      return;
-    }
-
-    const normalizedSymbol = form.symbol.trim().toUpperCase();
-    const entry = Number(form.entryPrice);
-    const isClosed = form.status === "closed";
-    const exit = isClosed && form.exitPrice !== "" ? Number(form.exitPrice) : null;
-    const size = Number(form.quantity);
-    const fees = Number(form.fees || 0);
-    const stop = form.stopLoss !== "" ? Number(form.stopLoss) : null;
-    const target = form.takeProfit !== "" ? Number(form.takeProfit) : null;
-
-    const numbersValid =
-      normalizedSymbol.length > 0 &&
-      Number.isFinite(entry) &&
-      entry > 0 &&
-      Number.isFinite(size) &&
-      size > 0 &&
-      Number.isFinite(fees) &&
-      fees >= 0 &&
-      (!isClosed || (exit != null && Number.isFinite(exit) && exit > 0)) &&
-      (stop == null || Number.isFinite(stop)) &&
-      (target == null || Number.isFinite(target));
-
-    if (!numbersValid) {
-      showNotice("Check the trade fields — something's missing or invalid");
-      return;
-    }
-
-    const openedAt = editingTrade ? editingTrade.opened_at : new Date().toISOString();
-    const closedAt = isClosed ? (editingTrade?.closed_at ?? new Date().toISOString()) : null;
-
-    const selectedPlaybook = form.playbookId ? activePlaybooks.find((p) => p.id === form.playbookId) : null;
-    const playbookSnapshot = selectedPlaybook
-      ? {
-          playbookId: selectedPlaybook.id,
-          name: selectedPlaybook.name,
-          checklist: selectedPlaybook.checklistItems.map((item) => ({
-            prompt: item.prompt,
-            isRequired: item.is_required,
-            answered: Boolean(form.checklistAnswers[item.id]),
-          })),
-          answers: form.checklistAnswers,
-        }
-      : null;
-
-    const payload: TradeInput = {
-      portfolioId: activePortfolioId,
-      accountId: form.accountId,
-      symbol: normalizedSymbol,
-      direction: form.direction,
-      status: form.status,
-      openedAt,
-      closedAt,
-      entryPrice: entry,
-      exitPrice: exit,
-      quantity: size,
-      quoteRate: form.quoteRate !== "" && Number.isFinite(Number(form.quoteRate)) ? Number(form.quoteRate) : null,
-      stopLoss: stop,
-      takeProfit: target,
-      fees,
-      spreadCost: 0,
-      swapFunding: 0,
-      isPlanned: form.isPlanned,
-      disciplineScore: form.disciplineScore,
-      confidence: form.confidence,
-      playbookId: form.playbookId,
-      playbookSnapshot,
-      notes: form.notes.trim() || null,
-      tagIds: form.tagIds,
-    };
-
-    if (editingTrade) {
-      saveTradeMutation.mutate({ tradeId: editingTrade.id, payload });
-    } else {
-      saveTradeMutation.mutate({ payload });
-    }
-  }
-
-  function exportCsv() {
-    const header = [
-      "symbol", "market", "direction", "status", "opened_at", "closed_at", "entry_price", "exit_price",
-      "quantity", "size_unit", "stop_loss", "take_profit", "fees", "net_pnl", "r_multiple", "curated_label", "session", "notes",
-    ];
-    const rows = filteredTrades.map((trade) => [
-      trade.symbol, trade.market, trade.direction, trade.status, trade.opened_at, trade.closed_at ?? "",
-      trade.entry_price, trade.exit_price ?? "", displaySize(trade).value, displaySize(trade).unit, trade.stop_loss ?? "", trade.take_profit ?? "",
-      trade.fees, trade.net_pnl ?? "", trade.realized_r_multiple ?? trade.planned_r_multiple ?? "",
-      trade.curated_label, trade.session ?? "", (trade.notes ?? "").replaceAll('"', '""'),
-    ]);
-    const csv = [header, ...rows].map((row) => row.map((cell) => `"${String(cell)}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `curated-trades-${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-    showNotice(filtersActive ? `Exported ${filteredTrades.length} filtered trades as CSV` : "Journal exported as CSV");
-  }
-
-  if (workspaceQuery.isLoading || !workspace) {
+  if (!workspace) {
     return <p className="py-10 text-center text-sm text-muted-foreground">Loading journal…</p>;
   }
+
+  // Past the last page (e.g. the final trade on it was just deleted, or a
+  // filter shrank the list): offer a way back instead of a blank table.
+  const pastLastPage = rows !== undefined && rows.length === 0 && total > 0;
+  const emptyState = pastLastPage ? (
+    <p className="px-6 py-8 text-center text-sm text-muted-foreground">
+      There's nothing on this page.{" "}
+      <button type="button" className="underline underline-offset-2" onClick={() => setSearch({ page: undefined })}>
+        Go to the first page
+      </button>
+      .
+    </p>
+  ) : filtersActive ? (
+    <p className="px-6 py-8 text-center text-sm text-muted-foreground">No trades match these filters. Adjust or clear them above.</p>
+  ) : (
+    <p className="px-6 py-8 text-center text-sm text-muted-foreground">
+      No trades yet. Log your first trade or import a CSV to get started.
+    </p>
+  );
 
   return (
     <>
       <section className="mb-6 flex flex-col justify-between gap-4 border-b border-border pb-5 sm:flex-row sm:items-center">
         <h1 className="page-title">Journal</h1>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={() => setIsImportOpen(true)}>
+          <Button variant="outline" onClick={() => setSearch({ import: true })}>
             <Upload /> Import CSV
           </Button>
-          <Button variant="outline" onClick={exportCsv}>
-            <Download /> Export {filtersActive ? "filtered" : ""} CSV
+          <Button variant="outline" onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}>
+            <Download /> {exportMutation.isPending ? "Exporting…" : `Export ${filtersActive ? "filtered " : ""}CSV`}
           </Button>
-          <Button onClick={openNewTrade}>
+          <Button onClick={() => setSearch({ new: true })}>
             <Plus /> Log trade
           </Button>
         </div>
       </section>
 
-      <section className="surface-panel mb-4 flex flex-wrap items-end gap-3 p-4">
-        <div className="min-w-[160px] flex-1">
-          <label className="field-label" htmlFor="journal-search">
-            Symbol
-          </label>
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              id="journal-search"
-              placeholder="Search e.g. GBPUSD"
-              className="pl-9"
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
+      <JournalFilters
+        filters={filters}
+        tags={allTags}
+        playbooks={activePlaybooks}
+        screenshotsLocked={viewMode === "gallery"}
+        onChange={setFilters}
+      />
+
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-xs text-muted-foreground">
+          {pageQuery.data ? `${total.toLocaleString()} trade${total === 1 ? "" : "s"}${filtersActive ? " match" : ""}` : "Loading…"}
+        </p>
+        <div className="direction-toggle" role="tablist" aria-label="View">
+          <Button
+            type="button"
+            variant={viewMode === "table" ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => setSearch({ view: undefined, page: undefined })}
+            aria-pressed={viewMode === "table"}
+          >
+            <Table2 /> Table
+          </Button>
+          <Button
+            type="button"
+            variant={viewMode === "gallery" ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => setSearch({ view: "gallery", page: undefined })}
+            aria-pressed={viewMode === "gallery"}
+          >
+            <Images /> Gallery
+          </Button>
+        </div>
+      </div>
+
+      {pageQuery.isError && (
+        <p className="surface-panel mb-4 p-4 text-sm text-destructive">
+          Couldn't load trades: {pageQuery.error.message}{" "}
+          <button type="button" className="underline underline-offset-2" onClick={() => void pageQuery.refetch()}>
+            Retry
+          </button>
+        </p>
+      )}
+
+      {viewMode === "gallery" ? (
+        <div>
+          <TradeGallery
+            trades={rows ?? []}
+            attachments={galleryQuery.data ?? []}
+            isLoading={pageQuery.isPending || galleryQuery.isLoading}
+            currencyByAccountId={currencyMap}
+          />
+          <div className="surface-panel mt-4 overflow-hidden p-0">
+            <JournalPager
+              total={total}
+              pageIndex={pageIndex}
+              pageSize={pageSize}
+              onPageChange={(index) => setSearch({ page: index === 0 ? undefined : index + 1 })}
+              onPageSizeChange={(size) =>
+                setSearch({ size: size === DEFAULT_TRADE_PAGE_SIZE ? undefined : (size as 25 | 50 | 100 | 200), page: undefined })
+              }
             />
           </div>
         </div>
-        <div className="w-[150px]">
-          <label className="field-label">Status</label>
-          <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as typeof statusFilter)}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All statuses</SelectItem>
-              <SelectItem value="open">Open</SelectItem>
-              <SelectItem value="closed">Closed</SelectItem>
-              <SelectItem value="incomplete">Incomplete</SelectItem>
-              <SelectItem value="cancelled">Cancelled</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="w-[150px]">
-          <label className="field-label">Label</label>
-          <Select value={labelFilter} onValueChange={(value) => setLabelFilter(value as typeof labelFilter)}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Curated + impulse</SelectItem>
-              <SelectItem value="curated">Curated only</SelectItem>
-              <SelectItem value="impulse">Impulse only</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="w-[260px]">
-          <span className="field-label">Date range</span>
-          <DateRangePicker from={dateFrom} to={dateTo} onChange={({ from, to }) => { setDateFrom(from); setDateTo(to); }} />
-        </div>
-        {filtersActive && (
-          <Button variant="ghost" onClick={clearFilters} className="mb-0.5">
-            <X /> Clear filters
-          </Button>
-        )}
-        <div className="ml-auto flex items-center gap-3">
-          <p className="mb-1.5 text-xs text-muted-foreground">
-            {filteredTrades.length} of {trades.length} trades
-          </p>
-          <div className="direction-toggle mb-0.5" role="tablist" aria-label="View">
-            <Button
-              type="button"
-              variant={viewMode === "table" ? "secondary" : "ghost"}
-              size="sm"
-              onClick={() => setViewMode("table")}
-              aria-pressed={viewMode === "table"}
-            >
-              <Table2 /> Table
-            </Button>
-            <Button
-              type="button"
-              variant={viewMode === "gallery" ? "secondary" : "ghost"}
-              size="sm"
-              onClick={() => setViewMode("gallery")}
-              aria-pressed={viewMode === "gallery"}
-            >
-              <Images /> Gallery
-            </Button>
-          </div>
-        </div>
-      </section>
-
-      {viewMode === "gallery" ? (
-        <TradeGallery
-          trades={filteredTrades}
-          attachments={galleryAttachmentsQuery.data ?? []}
-          isLoading={galleryAttachmentsQuery.isLoading}
-        />
       ) : (
-      <div className="surface-panel overflow-hidden p-0">
-        <div className="trade-table-wrap">
-          <table className="trade-table">
-            <thead>
-              <tr>
-                <th>Instrument</th>
-                <th>Direction</th>
-                <th>Session</th>
-                <th>Duration</th>
-                <th>Result</th>
-                <th>R multiple</th>
-                <th>Label</th>
-                <th>
-                  <span className="sr-only">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredTrades.map((trade) => (
-                <TradeRow
-                  trade={trade}
-                  tags={tagsByTradeId.get(trade.id) ?? []}
-                  attachmentCount={attachmentCountByTradeId.get(trade.id) ?? 0}
-                  key={trade.id}
-                  isDeleting={deleteTradeMutation.isPending && deleteTradeMutation.variables === trade.id}
-                  onOpenDetail={() => void navigate({ to: "/app/journal/$tradeId", params: { tradeId: trade.id } })}
-                  onEdit={() => openEditTrade(trade)}
-                  onDelete={() => {
-                    if (window.confirm(`Delete this ${trade.symbol} trade? This can't be undone.`)) {
-                      deleteTradeMutation.mutate(trade.id);
-                    }
-                  }}
-                />
-              ))}
-            </tbody>
-          </table>
-          {trades.length === 0 && (
-            <p className="px-6 py-8 text-center text-sm text-muted-foreground">
-              No trades yet. Log your first trade or import a CSV to get started.
-            </p>
-          )}
-          {trades.length > 0 && filteredTrades.length === 0 && (
-            <p className="px-6 py-8 text-center text-sm text-muted-foreground">
-              No trades match these filters.{" "}
-              <button type="button" className="underline underline-offset-2" onClick={clearFilters}>
-                Clear filters
-              </button>
-              .
-            </p>
-          )}
-        </div>
-      </div>
+        <JournalTable
+          rows={rows}
+          total={total}
+          sorting={sorting}
+          onSortingChange={onSortingChange}
+          pagination={pagination}
+          onPaginationChange={onPaginationChange}
+          isFetching={pageQuery.isFetching}
+          emptyState={emptyState}
+          meta={tableMeta}
+        />
       )}
 
-      {notice && (
-        <div className="toast-message">
-          <Check className="size-4 text-chart-2" />
-          {notice}
-        </div>
-      )}
       {isLogOpen && (
         <LogTradeModal
-          form={form}
-          setForm={setForm}
+          // A fresh form for each distinct trade (or for "new").
+          key={editingTrade?.id ?? "new"}
+          trade={search.edit ? editingTrade : null}
+          initialTagIds={search.edit ? (editingTrade?.tagIds ?? []) : []}
+          defaultAccountId={workspace.activeAccount?.id ?? workspace.accounts[0]?.id ?? null}
           equity={workspace.liveEquity}
           riskPercent={workspace.activeAccount?.default_risk_percent ?? workspace.accounts[0]?.default_risk_percent ?? 1}
-          isEditing={editingTrade != null}
           isSubmitting={saveTradeMutation.isPending}
           allTags={allTags}
-          onCreateTag={onCreateTag}
-          editingTradeId={editingTrade?.id ?? null}
+          onCreateTag={(name) => createTagMutation.mutateAsync({ data: { name } })}
           portfolioId={workspace.activePortfolio.id}
           accounts={workspace.accounts}
           userId={workspace.profile.user_id}
           playbooks={activePlaybooks}
-          pendingScreenshots={pendingScreenshots}
-          onPendingScreenshotsChange={setPendingScreenshots}
-          isLegacyUnits={editingIsLegacyUnits}
-          onClose={() => {
-            setIsLogOpen(false);
-            setEditingTrade(null);
-            setPendingScreenshots([]);
-            setEditingIsLegacyUnits(false);
-          }}
-          onSubmit={submitTrade}
+          onClose={closeModals}
+          onSubmit={(values) =>
+            saveTradeMutation.mutate(search.edit && editingTrade ? { values, tradeId: editingTrade.id } : { values })
+          }
         />
       )}
-      {isImportOpen && (
+      {search.import && (
         <CsvImportModal
           portfolioId={workspace.activePortfolio.id}
           // Falls back to the first account when scope is "All accounts" —
           // bulk import needs one definite target account, and there's no
-          // account picker in this modal yet. Worth a proper selector if
-          // multi-account CSV import turns out to be common.
+          // account picker in this modal yet.
           accountId={workspace.activeAccount?.id ?? workspace.accounts[0]!.id}
-          onClose={() => setIsImportOpen(false)}
+          onClose={closeModals}
           onImported={invalidateTrades}
         />
       )}

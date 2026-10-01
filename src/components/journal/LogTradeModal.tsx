@@ -2,179 +2,148 @@
 // planned trade" and "record a manual fill" are the same form, distinguished
 // only by isPlanned/status, so there's one code path for trade math instead
 // of two that could drift apart. Owns the playbook picker + checklist +
-// confidence score at log time; the parent (journal.tsx) freezes the
-// selected playbook's checklist + answers into playbook_snapshot at submit
-// time so a later edit to the playbook itself never rewrites this trade's
-// history (see the migration comment in
+// confidence score at log time; `buildTradeInput` (lib/trade-form.ts) freezes
+// the selected playbook's checklist + answers into playbook_snapshot at
+// submit time so a later edit to the playbook itself never rewrites this
+// trade's history (see the migration comment in
 // supabase/migrations/20260908120000_phase2_playbooks_and_ideas.sql).
+//
+// The form is a TanStack Form: values live in the form store (not in the
+// parent), validation is the zod `tradeFormSchema`, and the parent only hears
+// about a *valid* submit through `onSubmit(values)`. The risk preview below
+// reads live values through `useStore`.
+import { useStore } from "@tanstack/react-form";
 import { Activity, ArrowDownRight, ArrowUpRight, ClipboardCheck, Plus, ShieldCheck, Tag as TagIcon, Target } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { toast } from "sonner";
 
+import { AttachmentsPanel, PendingScreenshotsPicker } from "@/components/journal/AttachmentsPanel";
+import { InstrumentSelect } from "@/components/journal/InstrumentSelect";
+import { PartialExitsPanel } from "@/components/journal/PartialExitsPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { AttachmentsPanel, PendingScreenshotsPicker } from "@/components/journal/AttachmentsPanel";
-import { PartialExitsPanel } from "@/components/journal/PartialExitsPanel";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { PlaybookWithChecklist } from "@/lib/playbooks.functions";
+import type { Database } from "@/integrations/supabase/types";
+import { FieldMessage, formProps, useAppForm } from "@/lib/form";
 import {
   buildSizingContext,
   getInstrumentSpec,
+  isLegacyUnitQuantity,
   needsQuoteRate,
   sizeLabel,
   type SizingContext,
 } from "@/lib/instruments";
-import { calculateRiskPreview, type Direction, type TradeStatus } from "@/lib/trade-calc";
-import type { Database } from "@/integrations/supabase/types";
+import { formatMoney } from "@/lib/money";
+import type { PlaybookWithChecklist } from "@/lib/playbooks.functions";
+import { calculateRiskPreview } from "@/lib/trade-calc";
+import { emptyTradeForm, tradeFormSchema, tradeToFormValues, type TradeFormValues } from "@/lib/trade-form";
 
 type TagRow = Database["public"]["Tables"]["tags"]["Row"];
 type AccountRow = Database["public"]["Tables"]["accounts"]["Row"];
+type TradeRow = Database["public"]["Tables"]["trades"]["Row"];
 
-export const emptyTradeForm = {
-  accountId: null as string | null,
-  symbol: "",
-  direction: "long" as Direction,
-  status: "closed" as TradeStatus,
-  entryPrice: "",
-  exitPrice: "",
-  quantity: "",
-  // Account-currency value of 1 unit of the quote currency; only asked for crosses (EURGBP, GBPJPY…).
-  quoteRate: "",
-  stopLoss: "",
-  takeProfit: "",
-  fees: "0",
-  notes: "",
-  isPlanned: true,
-  disciplineScore: 3,
-  confidence: 3,
-  playbookId: null as string | null,
-  checklistAnswers: {} as Record<string, boolean>,
-  tagIds: [] as string[],
-};
-
-export type TradeForm = typeof emptyTradeForm;
-
-/** Currency-formatted amount in the account's own currency (falls back to "1,234 CODE" for unknown codes). */
-function formatMoney(amount: number, currency: string, fractionDigits = 0): string {
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency,
-      minimumFractionDigits: fractionDigits,
-      maximumFractionDigits: fractionDigits,
-    }).format(amount);
-  } catch {
-    return `${amount.toLocaleString(undefined, { maximumFractionDigits: fractionDigits })} ${currency}`;
-  }
-}
-
-const STATUS_OPTIONS: { value: TradeStatus; label: string }[] = [
+const STATUS_OPTIONS = [
   { value: "closed", label: "Closed" },
   { value: "open", label: "Open" },
   { value: "cancelled", label: "Cancelled" },
   { value: "incomplete", label: "Incomplete" },
-];
+] as const;
+
+const DIRECTION_OPTIONS = [
+  { value: "long", label: "Long", icon: <ArrowUpRight /> },
+  { value: "short", label: "Short", icon: <ArrowDownRight /> },
+] as const;
+
+const LABEL_OPTIONS = [
+  { value: true, label: "Curated", icon: <ShieldCheck /> },
+  { value: false, label: "Impulse", icon: <Activity /> },
+] as const;
 
 export function LogTradeModal({
-  form,
-  setForm,
+  trade,
+  initialTagIds,
+  defaultAccountId,
   equity,
   riskPercent,
-  isEditing,
   isSubmitting,
   allTags,
   onCreateTag,
-  editingTradeId,
   portfolioId,
   accounts,
   userId,
   playbooks,
-  pendingScreenshots,
-  onPendingScreenshotsChange,
-  isLegacyUnits = false,
   onClose,
   onSubmit,
 }: {
-  form: TradeForm;
-  setForm: (value: TradeForm) => void;
+  /** The trade being edited, or null when logging a new one. */
+  trade: TradeRow | null;
+  /** Tags already linked to `trade` (ignored for a new trade). */
+  initialTagIds: string[];
+  /** Pre-selected account for a new trade. */
+  defaultAccountId: string | null;
   equity: number;
   riskPercent: number;
-  isEditing: boolean;
   isSubmitting: boolean;
   allTags: TagRow[];
   onCreateTag: (name: string) => Promise<TagRow>;
-  editingTradeId: string | null;
   portfolioId: string;
   accounts: AccountRow[];
   userId: string;
   playbooks: PlaybookWithChecklist[];
-  /** Screenshots staged for a trade that isn't saved yet (new-trade flow only). */
-  pendingScreenshots: File[];
-  onPendingScreenshotsChange: (files: File[]) => void;
-  /** Editing a pre-lots trade whose partial exits are still stored in raw units (they convert on save). */
-  isLegacyUnits?: boolean;
   onClose: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: (values: TradeFormValues) => void;
 }) {
-  const patch = (partial: Partial<TradeForm>) => setForm({ ...form, ...partial });
-  const [newTagName, setNewTagName] = useState("");
-  const [isCreatingTag, setIsCreatingTag] = useState(false);
-  const selectedPlaybook = playbooks.find((p) => p.id === form.playbookId) ?? null;
+  const isEditing = trade != null;
+  const editingTradeId = trade?.id ?? null;
+  // Editing a pre-lots trade whose partial exits are still stored in raw units (they convert on save).
+  const isLegacyUnits = trade
+    ? isLegacyUnitQuantity({ symbol: trade.symbol, quantity: trade.quantity, calculationVersion: trade.calculation_version })
+    : false;
 
-  function toggleChecklistItem(itemId: string) {
-    patch({ checklistAnswers: { ...form.checklistAnswers, [itemId]: !form.checklistAnswers[itemId] } });
-  }
+  const form = useAppForm({
+    defaultValues: trade ? tradeToFormValues(trade, initialTagIds) : { ...emptyTradeForm, accountId: defaultAccountId },
+    validators: { onSubmit: tradeFormSchema },
+    onSubmit: ({ value }) => onSubmit(value),
+    onSubmitInvalid: () => toast.error("Check the trade fields — something's missing or invalid"),
+  });
+  const values = useStore(form.store, (state) => state.values);
 
-  function toggleTag(tagId: string) {
-    patch({
-      tagIds: form.tagIds.includes(tagId)
-        ? form.tagIds.filter((id) => id !== tagId)
-        : [...form.tagIds, tagId],
-    });
-  }
-
-  async function handleCreateTag() {
-    const name = newTagName.trim();
-    if (!name) return;
-    setIsCreatingTag(true);
-    try {
+  // Inline "add a tag" mini-form. Not a <form> element (it sits inside the
+  // trade form), so Enter is wired to its handleSubmit explicitly.
+  const tagForm = useAppForm({
+    defaultValues: { name: "" },
+    onSubmit: async ({ value, formApi }) => {
+      const name = value.name.trim();
+      if (!name) return;
       const tag = await onCreateTag(name);
-      patch({ tagIds: [...form.tagIds, tag.id] });
-      setNewTagName("");
-    } finally {
-      setIsCreatingTag(false);
-    }
-  }
+      form.setFieldValue("tagIds", (ids) => [...ids, tag.id]);
+      formApi.reset();
+    },
+  });
 
-  const entry = Number(form.entryPrice);
-  const stop = Number(form.stopLoss);
-  const exit = Number(form.exitPrice);
-  const size = Number(form.quantity);
-  const hasStop = form.stopLoss !== "" && Number.isFinite(stop);
-  const hasEntry = form.entryPrice !== "" && Number.isFinite(entry);
+  const selectedPlaybook = playbooks.find((p) => p.id === values.playbookId) ?? null;
+
+  const entry = Number(values.entryPrice);
+  const stop = Number(values.stopLoss);
+  const exit = Number(values.exitPrice);
+  const size = Number(values.quantity);
+  const hasStop = values.stopLoss !== "" && Number.isFinite(stop);
+  const hasEntry = values.entryPrice !== "" && Number.isFinite(entry);
 
   // What the symbol is (lots vs units, contract size, quote currency) drives
   // the size field, the risk preview and whether a conversion rate is needed.
-  const spec = getInstrumentSpec(form.symbol);
-  const selectedAccount = accounts.find((account) => account.id === form.accountId) ?? accounts[0];
+  const spec = getInstrumentSpec(values.symbol);
+  const selectedAccount = accounts.find((account) => account.id === values.accountId) ?? accounts[0];
   const accountCurrency = (selectedAccount?.base_currency ?? "USD").toUpperCase();
-  const askForQuoteRate = form.symbol.trim() !== "" && needsQuoteRate(spec, accountCurrency);
-  const quoteRate = form.quoteRate !== "" ? Number(form.quoteRate) : null;
+  const askForQuoteRate = values.symbol.trim() !== "" && needsQuoteRate(spec, accountCurrency);
+  const quoteRate = values.quoteRate !== "" ? Number(values.quoteRate) : null;
   const sizeText = sizeLabel(spec);
   let sizing: SizingContext | undefined;
   if (spec.sizeUnit === "lots") {
     try {
-      sizing = buildSizingContext({ symbol: form.symbol, accountCurrency, quoteRate });
+      sizing = buildSizingContext({ symbol: values.symbol, accountCurrency, quoteRate });
     } catch {
       sizing = undefined; // cross pair, rate not entered yet — the field below asks for it
     }
@@ -200,20 +169,29 @@ export function LogTradeModal({
       : null;
   const suggestedSize = preview ? (preview.suggestedLotsRounded ?? preview.suggestedQuantity) : null;
   const plannedR =
-    preview &&
-    form.takeProfit !== "" &&
-    Number.isFinite(Number(form.takeProfit)) &&
-    preview.stopDistance > 0
-      ? Math.abs(Number(form.takeProfit) - entry) / preview.stopDistance
+    preview && values.takeProfit !== "" && Number.isFinite(Number(values.takeProfit)) && preview.stopDistance > 0
+      ? Math.abs(Number(values.takeProfit) - entry) / preview.stopDistance
       : null;
   const realizedR =
-    preview &&
-    form.status === "closed" &&
-    Number.isFinite(exit) &&
-    form.exitPrice !== "" &&
-    preview.stopDistance > 0
+    preview && values.status === "closed" && Number.isFinite(exit) && values.exitPrice !== "" && preview.stopDistance > 0
       ? Math.abs(exit - entry) / preview.stopDistance
       : null;
+
+  const quantityField = (
+    <form.AppField name="quantity">
+      {(field) => (
+        <field.TextField
+          label={sizeText.noun}
+          type="number"
+          step={spec.sizeUnit === "lots" ? "0.01" : "any"}
+          min="0"
+          inputMode="decimal"
+          className="font-mono"
+          placeholder={sizeText.placeholder}
+        />
+      )}
+    </form.AppField>
+  );
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -224,211 +202,84 @@ export function LogTradeModal({
             <DialogTitle id="log-trade-title">{isEditing ? "Edit trade" : "Log a trade"}</DialogTitle>
           </div>
         </DialogHeader>
-        <form onSubmit={onSubmit} className="min-h-0 flex-1 space-y-5 overflow-y-auto p-6">
+        <form {...formProps(form)} className="min-h-0 flex-1 space-y-5 overflow-y-auto p-6">
           {accounts.length > 1 && (
-            <div>
-              <span className="field-label">Account</span>
-              <Select value={form.accountId ?? ""} onValueChange={(value) => patch({ accountId: value })}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Which account is this for?" />
-                </SelectTrigger>
-                <SelectContent>
-                  {accounts.map((account) => (
-                    <SelectItem key={account.id} value={account.id}>
-                      {account.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <form.AppField name="accountId">
+              {(field) => (
+                <field.SelectField
+                  label="Account"
+                  placeholder="Which account is this for?"
+                  options={accounts.map((account) => ({ value: account.id, label: account.name }))}
+                />
+              )}
+            </form.AppField>
           )}
           <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label htmlFor="trade-symbol" className="field-label">
-                Instrument
-              </label>
-              <Input
-                id="trade-symbol"
-                value={form.symbol}
-                onChange={(event) => patch({ symbol: event.target.value })}
-                placeholder="EURUSD"
-                autoFocus
-              />
-            </div>
-            <div>
-              <span className="field-label">Status</span>
-              <Select
-                value={form.status}
-                onValueChange={(value: TradeStatus) => patch({ status: value })}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {STATUS_OPTIONS.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <form.AppField name="symbol">
+              {(field) => (
+                <div>
+                  <label htmlFor="trade-symbol" className="field-label">
+                    Instrument
+                  </label>
+                  <InstrumentSelect id="trade-symbol" value={field.state.value} onChange={field.handleChange} autoFocus />
+                  <FieldMessage />
+                </div>
+              )}
+            </form.AppField>
+            <form.AppField name="status">
+              {(field) => <field.SelectField label="Status" options={STATUS_OPTIONS} />}
+            </form.AppField>
           </div>
-          <div>
-            <span className="field-label">Direction</span>
-            <div className="direction-toggle">
-              {(
-                [
-                  { value: "long" as Direction, label: "Long" },
-                  { value: "short" as Direction, label: "Short" },
-                ] as const
-              ).map((item) => (
-                <Button
-                  type="button"
-                  key={item.value}
-                  variant={form.direction === item.value ? "secondary" : "ghost"}
-                  className="flex-1"
-                  onClick={() => patch({ direction: item.value })}
-                >
-                  {item.value === "long" ? <ArrowUpRight /> : <ArrowDownRight />}
-                  {item.label}
-                </Button>
-              ))}
-            </div>
-          </div>
+          <form.AppField name="direction">
+            {(field) => <field.SegmentedField label="Direction" options={DIRECTION_OPTIONS} />}
+          </form.AppField>
           <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label htmlFor="trade-entry" className="field-label">
-                Entry price
-              </label>
-              <Input
-                id="trade-entry"
-                type="number"
-                step="any"
-                value={form.entryPrice}
-                onChange={(event) => patch({ entryPrice: event.target.value })}
-                placeholder="1.0850"
-              />
-            </div>
-            {form.status === "closed" ? (
-              <div>
-                <label htmlFor="trade-exit" className="field-label">
-                  Exit price
-                </label>
-                <Input
-                  id="trade-exit"
-                  type="number"
-                  step="any"
-                  value={form.exitPrice}
-                  onChange={(event) => patch({ exitPrice: event.target.value })}
-                  placeholder="1.0920"
-                />
-              </div>
+            <form.AppField name="entryPrice">
+              {(field) => <field.TextField label="Entry price" type="number" step="any" placeholder="1.0850" />}
+            </form.AppField>
+            {values.status === "closed" ? (
+              <form.AppField name="exitPrice">
+                {(field) => <field.TextField label="Exit price" type="number" step="any" placeholder="1.0920" />}
+              </form.AppField>
             ) : (
-              <div>
-                <label htmlFor="trade-quantity-open" className="field-label">
-                  {sizeText.noun}
-                </label>
-                <Input
-                  id="trade-quantity-open"
-                  type="number"
-                  step={spec.sizeUnit === "lots" ? "0.01" : "any"}
-                  min="0"
-                  inputMode="decimal"
-                  className="font-mono"
-                  value={form.quantity}
-                  onChange={(event) => patch({ quantity: event.target.value })}
-                  placeholder={sizeText.placeholder}
-                />
-              </div>
+              quantityField
             )}
-            {form.status === "closed" && (
-              <div>
-                <label htmlFor="trade-quantity" className="field-label">
-                  {sizeText.noun}
-                </label>
-                <Input
-                  id="trade-quantity"
-                  type="number"
-                  step={spec.sizeUnit === "lots" ? "0.01" : "any"}
-                  min="0"
-                  inputMode="decimal"
-                  className="font-mono"
-                  value={form.quantity}
-                  onChange={(event) => patch({ quantity: event.target.value })}
-                  placeholder={sizeText.placeholder}
-                />
-              </div>
-            )}
-            <div>
-              <label htmlFor="trade-fees" className="field-label">
-                Fees ({accountCurrency})
-              </label>
-              <Input
-                id="trade-fees"
-                type="number"
-                step="any"
-                value={form.fees}
-                onChange={(event) => patch({ fees: event.target.value })}
-                placeholder="0"
-              />
-            </div>
-            <div>
-              <label htmlFor="trade-stop" className="field-label">
-                Stop loss
-              </label>
-              <Input
-                id="trade-stop"
-                type="number"
-                step="any"
-                value={form.stopLoss}
-                onChange={(event) => patch({ stopLoss: event.target.value })}
-                placeholder="Optional"
-              />
-            </div>
-            <div>
-              <label htmlFor="trade-target" className="field-label">
-                Take profit
-              </label>
-              <Input
-                id="trade-target"
-                type="number"
-                step="any"
-                value={form.takeProfit}
-                onChange={(event) => patch({ takeProfit: event.target.value })}
-                placeholder="Optional"
-              />
-            </div>
+            {values.status === "closed" && quantityField}
+            <form.AppField name="fees">
+              {(field) => <field.TextField label={`Fees (${accountCurrency})`} type="number" step="any" placeholder="0" />}
+            </form.AppField>
+            <form.AppField name="stopLoss">
+              {(field) => <field.TextField label="Stop loss" type="number" step="any" placeholder="Optional" />}
+            </form.AppField>
+            <form.AppField name="takeProfit">
+              {(field) => <field.TextField label="Take profit" type="number" step="any" placeholder="Optional" />}
+            </form.AppField>
           </div>
           {askForQuoteRate && (
-            <div>
-              <label htmlFor="trade-quote-rate" className="field-label">
-                {accountCurrency} value of 1 {spec.quote}
-              </label>
-              <Input
-                id="trade-quote-rate"
-                type="number"
-                step="any"
-                min="0"
-                className="font-mono"
-                value={form.quoteRate}
-                onChange={(event) => patch({ quoteRate: event.target.value })}
-                placeholder={spec.quote === "JPY" ? "0.0067" : "1.27"}
-              />
-              <p className="form-hint">
-                {spec.symbol} is priced in {spec.quote}, not {accountCurrency}, so P&amp;L and risk need this rate to be
-                converted. Use the current {spec.quote}/{accountCurrency} rate (for example, what 1 {spec.quote} buys in{" "}
-                {accountCurrency}).
-              </p>
-            </div>
+            <form.AppField name="quoteRate">
+              {(field) => (
+                <field.TextField
+                  label={`${accountCurrency} value of 1 ${spec.quote}`}
+                  type="number"
+                  step="any"
+                  min="0"
+                  className="font-mono"
+                  placeholder={spec.quote === "JPY" ? "0.0067" : "1.27"}
+                  hint={
+                    <>
+                      {spec.symbol} is priced in {spec.quote}, not {accountCurrency}, so P&amp;L and risk need this rate
+                      to be converted. Use the current {spec.quote}/{accountCurrency} rate (for example, what 1{" "}
+                      {spec.quote} buys in {accountCurrency}).
+                    </>
+                  }
+                />
+              )}
+            </form.AppField>
           )}
           {preview && (
             <div className="rounded-md border border-border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground">
-              <Target className="mr-1 inline size-3 text-chart-2" /> Risk preview at {riskPercent}%
-              of equity:{" "}
-              <span className="font-mono font-semibold text-foreground">
-                {formatMoney(preview.riskAmount, accountCurrency)}
-              </span>{" "}
+              <Target className="mr-1 inline size-3 text-chart-2" /> Risk preview at {riskPercent}% of equity:{" "}
+              <span className="font-mono font-semibold text-foreground">{formatMoney(preview.riskAmount, accountCurrency)}</span>{" "}
               risk, suggested size{" "}
               <span className="font-mono font-semibold text-foreground">
                 {suggestedSize != null
@@ -448,48 +299,37 @@ export function LogTradeModal({
               )}
               {plannedR != null && (
                 <>
-                  , planned{" "}
-                  <span className="font-mono font-semibold text-foreground">{plannedR.toFixed(1)}R</span>
+                  , planned <span className="font-mono font-semibold text-foreground">{plannedR.toFixed(1)}R</span>
                 </>
               )}
               {realizedR != null && (
                 <>
-                  , realized{" "}
-                  <span className="font-mono font-semibold text-foreground">{realizedR.toFixed(1)}R</span>
+                  , realized <span className="font-mono font-semibold text-foreground">{realizedR.toFixed(1)}R</span>
                 </>
               )}
               {yourRisk != null && (
                 <>
                   , your size risks{" "}
-                  <span className="font-mono font-semibold text-foreground">
-                    {formatMoney(yourRisk, accountCurrency)}
-                  </span>
+                  <span className="font-mono font-semibold text-foreground">{formatMoney(yourRisk, accountCurrency)}</span>
                 </>
               )}
             </div>
           )}
-          <div>
-            <label htmlFor="trade-notes" className="field-label">
-              Notes
-            </label>
-            <Textarea
-              id="trade-notes"
-              rows={3}
-              value={form.notes}
-              onChange={(event) => patch({ notes: event.target.value })}
-              placeholder="Setup, context, what you saw…"
-            />
-          </div>
+          <form.AppField name="notes">
+            {(field) => <field.TextareaField label="Notes" rows={3} placeholder="Setup, context, what you saw…" />}
+          </form.AppField>
           <div>
             <span className="field-label">Tags</span>
             <div className="flex flex-wrap gap-1.5">
               {allTags.map((tag) => {
-                const selected = form.tagIds.includes(tag.id);
+                const selected = values.tagIds.includes(tag.id);
                 return (
                   <button
                     type="button"
                     key={tag.id}
-                    onClick={() => toggleTag(tag.id)}
+                    onClick={() =>
+                      form.setFieldValue("tagIds", (ids) => (ids.includes(tag.id) ? ids.filter((id) => id !== tag.id) : [...ids, tag.id]))
+                    }
                     aria-pressed={selected}
                   >
                     <Badge variant={selected ? "default" : "outline"} className="cursor-pointer">
@@ -499,29 +339,37 @@ export function LogTradeModal({
                 );
               })}
             </div>
-            <div className="mt-2 flex gap-2">
-              <Input
-                value={newTagName}
-                onChange={(event) => setNewTagName(event.target.value)}
-                placeholder="New tag name"
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void handleCreateTag();
-                  }
-                }}
-              />
-              <Button type="button" variant="outline" size="sm" disabled={isCreatingTag} onClick={() => void handleCreateTag()}>
-                {isCreatingTag ? "Adding…" : "Add"}
-              </Button>
+            <div className="mt-2 flex items-start gap-2">
+              <div className="flex-1">
+                <tagForm.AppField name="name">
+                  {(field) => (
+                    <field.TextField
+                      placeholder="New tag name"
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void tagForm.handleSubmit();
+                        }
+                      }}
+                    />
+                  )}
+                </tagForm.AppField>
+              </div>
+              <tagForm.Subscribe selector={(state) => state.isSubmitting}>
+                {(isCreatingTag) => (
+                  <Button type="button" variant="outline" size="sm" disabled={isCreatingTag} onClick={() => void tagForm.handleSubmit()}>
+                    {isCreatingTag ? "Adding…" : "Add"}
+                  </Button>
+                )}
+              </tagForm.Subscribe>
             </div>
           </div>
-          {editingTradeId && form.status === "open" && (
+          {editingTradeId && values.status === "open" && (
             <>
               <PartialExitsPanel
                 tradeId={editingTradeId}
                 portfolioId={portfolioId}
-                totalQuantity={Number(form.quantity) || 0}
+                totalQuantity={Number(values.quantity) || 0}
                 unit={spec.sizeUnit}
               />
               {isLegacyUnits && (
@@ -535,47 +383,39 @@ export function LogTradeModal({
           {editingTradeId ? (
             <AttachmentsPanel tradeId={editingTradeId} userId={userId} />
           ) : (
-            <PendingScreenshotsPicker files={pendingScreenshots} onChange={onPendingScreenshotsChange} />
+            <form.AppField name="pendingScreenshots">
+              {(field) => <PendingScreenshotsPicker files={field.state.value} onChange={field.handleChange} />}
+            </form.AppField>
           )}
-          <div className="direction-toggle">
-            <Button
-              type="button"
-              variant={form.isPlanned ? "secondary" : "ghost"}
-              className="flex-1"
-              onClick={() => patch({ isPlanned: true })}
-            >
-              <ShieldCheck /> Curated
-            </Button>
-            <Button
-              type="button"
-              variant={!form.isPlanned ? "secondary" : "ghost"}
-              className="flex-1"
-              onClick={() => patch({ isPlanned: false })}
-            >
-              <Activity /> Impulse
-            </Button>
-          </div>
-          <div>
-            <span className="field-label">Playbook (optional)</span>
-            <Select
-              value={form.playbookId ?? "none"}
-              onValueChange={(value) =>
-                patch({ playbookId: value === "none" ? null : value, checklistAnswers: {} })
-              }
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">No playbook</SelectItem>
-                {playbooks.map((playbook) => (
-                  <SelectItem key={playbook.id} value={playbook.id}>
-                    {playbook.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          <form.AppField name="isPlanned">
+            {(field) => <field.SegmentedField options={LABEL_OPTIONS} />}
+          </form.AppField>
+          <form.AppField
+            name="playbookId"
+            listeners={{ onChange: () => form.setFieldValue("checklistAnswers", {}) }}
+          >
+            {(field) => (
+              <div>
+                <span className="field-label">Playbook (optional)</span>
+                <Select
+                  value={field.state.value ?? "none"}
+                  onValueChange={(value) => field.handleChange(value === "none" ? null : value)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No playbook</SelectItem>
+                    {playbooks.map((playbook) => (
+                      <SelectItem key={playbook.id} value={playbook.id}>
+                        {playbook.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+          </form.AppField>
           {selectedPlaybook && selectedPlaybook.checklistItems.length > 0 && (
             <div className="rounded-md border border-border p-3">
               <p className="mb-2 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
@@ -586,8 +426,10 @@ export function LogTradeModal({
                   <label key={item.id} className="flex items-start gap-2 text-sm">
                     <Checkbox
                       className="mt-0.5"
-                      checked={Boolean(form.checklistAnswers[item.id])}
-                      onCheckedChange={() => toggleChecklistItem(item.id)}
+                      checked={Boolean(values.checklistAnswers[item.id])}
+                      onCheckedChange={() =>
+                        form.setFieldValue("checklistAnswers", (answers) => ({ ...answers, [item.id]: !answers[item.id] }))
+                      }
                     />
                     <span>
                       {item.prompt}
@@ -605,39 +447,17 @@ export function LogTradeModal({
               </div>
             </div>
           )}
-          <div>
-            <span className="field-label">Confidence — {form.confidence}/5</span>
-            <input
-              type="range"
-              min={1}
-              max={5}
-              step={1}
-              value={form.confidence}
-              onChange={(event) => patch({ confidence: Number(event.target.value) })}
-              className="w-full accent-current"
-              aria-label="Confidence"
-            />
-          </div>
-          <div>
-            <span className="field-label">Discipline score — {form.disciplineScore}/5</span>
-            <input
-              type="range"
-              min={1}
-              max={5}
-              step={1}
-              value={form.disciplineScore}
-              onChange={(event) => patch({ disciplineScore: Number(event.target.value) })}
-              className="w-full accent-current"
-              aria-label="Discipline score"
-            />
-          </div>
+          <form.AppField name="confidence">{(field) => <field.RangeField label="Confidence" />}</form.AppField>
+          <form.AppField name="disciplineScore">{(field) => <field.RangeField label="Discipline score" />}</form.AppField>
           <div className="sticky bottom-0 -mx-6 -mb-6 flex gap-3 border-t border-border bg-card p-6 pt-4">
             <Button type="button" variant="outline" className="flex-1" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" className="flex-1" disabled={isSubmitting}>
-              <Plus /> {isSubmitting ? "Saving…" : isEditing ? "Save changes" : "Add trade"}
-            </Button>
+            <form.AppForm>
+              <form.SubmitButton className="flex-1" pendingLabel="Saving…" pending={isSubmitting}>
+                <Plus /> {isEditing ? "Save changes" : "Add trade"}
+              </form.SubmitButton>
+            </form.AppForm>
           </div>
         </form>
       </DialogContent>

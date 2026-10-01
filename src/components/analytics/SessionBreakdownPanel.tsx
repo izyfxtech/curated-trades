@@ -1,10 +1,11 @@
 import { Link } from "@tanstack/react-router";
 
 import type { BreakdownGroup } from "@/lib/analytics";
+import { formatSignedMoney } from "@/lib/money";
 
 const SESSION_ORDER = ["Asia", "London", "New York"];
 
-export function SessionBreakdownPanel({ groups }: { groups: BreakdownGroup[] }) {
+export function SessionBreakdownPanel({ groups, currency = "USD" }: { groups: BreakdownGroup[]; currency?: string }) {
   const ordered = [...groups].sort((a, b) => {
     const ai = SESSION_ORDER.indexOf(a.key);
     const bi = SESSION_ORDER.indexOf(b.key);
@@ -37,7 +38,7 @@ export function SessionBreakdownPanel({ groups }: { groups: BreakdownGroup[] }) 
                   <span className={positive ? "progress-fill" : "progress-fill progress-danger"} style={{ width: `${width}%` }} />
                 </div>
                 <span className={`w-20 shrink-0 text-right font-mono text-xs font-medium ${positive ? "text-chart-2" : "text-destructive"}`}>
-                  {positive ? "+" : "−"}${Math.abs(group.stats.netPnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  {formatSignedMoney(group.stats.netPnl, currency)}
                 </span>
                 <span className="w-24 shrink-0 text-right text-xs text-muted-foreground">
                   {group.trades.length} trade{group.trades.length === 1 ? "" : "s"}, {group.stats.winRate ?? 0}% win

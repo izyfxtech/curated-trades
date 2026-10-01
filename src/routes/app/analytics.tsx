@@ -6,21 +6,26 @@
 // cards sit at the top — every single one traces to one of exactly three
 // explicit rules in generateInsights() (lib/analytics.ts), not a statistical
 // or AI-generated judgment call.
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+//
+// The range, custom dates, minimum sample size and breakdown dimension all
+// live in the URL (typed search params), so a view of the analytics can be
+// bookmarked or shared and survives a refresh. The numbers themselves are not
+// computed here: the server filters the trades in the database, runs the
+// calculations beside it (analytics.functions.ts → lib/analytics-report.ts) and
+// sends back one small finished report — so this page costs the same at 50
+// trades or 50,000, and nothing is ever silently truncated.
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { format, startOfDay, subDays } from "date-fns";
+import { createFileRoute } from "@tanstack/react-router";
+import { startOfDay, subDays } from "date-fns";
 import { Percent, TrendingDown, TrendingUp, Wallet } from "lucide-react";
+import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
 import { DateRangePicker } from "@/components/ui/date-range-picker";
 import { Input } from "@/components/ui/input";
-import { getWorkspace } from "@/lib/portfolios.functions";
-import { listTrades, listTradeTagLinks, TRADES_LIST_DEFAULT_LIMIT } from "@/lib/trades.functions";
-import { listTradeReviews } from "@/lib/reviews.functions";
-import { listTags } from "@/lib/tags.functions";
-import { summarizeClosedTrades, type ClosedTradeForAnalytics } from "@/lib/trade-calc";
-import { buildEquityCurve } from "@/lib/equity-curve";
+import { analyticsReportQueryOptions, earliestTradeQueryOptions, workspaceQueryOptions } from "@/lib/queries";
+import type { AnalyticsReport } from "@/lib/analytics-report";
+import { formatMoney, formatSignedMoney, workspaceCurrency } from "@/lib/money";
 import { MetricCard } from "@/components/journal/dashboard-widgets";
 import { EquityCurveChart } from "@/components/analytics/EquityCurveChart";
 import { ComparisonBar } from "@/components/analytics/ComparisonBar";
@@ -30,15 +35,7 @@ import { BreakdownExplorer } from "@/components/analytics/BreakdownExplorer";
 import { RDistributionChart } from "@/components/analytics/RDistributionChart";
 import { StreakDistributionCard } from "@/components/analytics/StreakDistributionCard";
 import { InsightCards } from "@/components/analytics/InsightCards";
-import {
-  computeBreakdown,
-  computeRatioMetrics,
-  computeRDistribution,
-  computeStreakDistribution,
-  enrichTrades,
-  generateInsights,
-  type BreakdownDimension,
-} from "@/lib/analytics";
+import { BREAKDOWN_DIMENSIONS, type BreakdownDimension } from "@/lib/analytics";
 
 export const Route = createFileRoute("/app/analytics")({
   head: () => ({
@@ -47,159 +44,90 @@ export const Route = createFileRoute("/app/analytics")({
       { name: "description", content: "Deeper breakdowns: Curated vs Impulse, daily P&L, and performance over time." },
     ],
   }),
+  validateSearch: z.object({
+    /** Preset window in days; "all" = since the first trade. Default 30. */
+    range: z.enum(["7", "30", "90", "all"]).optional(),
+    /** A custom window; when either is set it wins over `range`. */
+    from: z.string().optional(),
+    to: z.string().optional(),
+    min: z.number().int().min(1).max(100).optional(),
+    by: z.enum(BREAKDOWN_DIMENSIONS.map((d) => d.value) as [string, ...string[]]).optional(),
+  }),
   component: AnalyticsPage,
 });
 
 const RANGE_OPTIONS = [
-  { label: "7D", days: 7 },
-  { label: "30D", days: 30 },
-  { label: "90D", days: 90 },
-  { label: "All", days: null },
+  { label: "7D", value: "7", days: 7 },
+  { label: "30D", value: "30", days: 30 },
+  { label: "90D", value: "90", days: 90 },
+  { label: "All", value: "all", days: null },
 ] as const;
 
 function AnalyticsPage() {
-  const navigate = useNavigate();
-  const workspaceQuery = useQuery({ queryKey: ["workspace"], queryFn: () => getWorkspace() });
-  const workspace = workspaceQuery.data;
+  const navigate = Route.useNavigate();
+  const search = Route.useSearch();
+  const { data: workspace } = useQuery(workspaceQueryOptions);
   const activePortfolioId = workspace?.activePortfolio.id;
+  const currency = workspace ? workspaceCurrency(workspace) : "USD";
 
-  const tradesQuery = useQuery({
-    queryKey: ["trades", activePortfolioId, workspace?.activeAccount?.id, TRADES_LIST_DEFAULT_LIMIT],
-    queryFn: () =>
-      listTrades({
-        data: { portfolioId: activePortfolioId as string, accountId: workspace?.activeAccount?.id, limit: TRADES_LIST_DEFAULT_LIMIT },
-      }),
-    enabled: activePortfolioId != null,
-  });
-  const allTrades = useMemo(() => tradesQuery.data ?? [], [tradesQuery.data]);
-
-  const reviewsQuery = useQuery({
-    queryKey: ["trade-reviews-all", activePortfolioId],
-    queryFn: () => listTradeReviews({ data: { portfolioId: activePortfolioId as string } }),
-    enabled: activePortfolioId != null,
-  });
-  const tagLinksQuery = useQuery({
-    queryKey: ["trade-tag-links", activePortfolioId],
-    queryFn: () => listTradeTagLinks({ data: { portfolioId: activePortfolioId as string } }),
-    enabled: activePortfolioId != null,
-  });
-  const tagsQuery = useQuery({ queryKey: ["tags"], queryFn: () => listTags() });
-
-  const [rangeDays, setRangeDays] = useState<number | null>(30);
+  const rangeValue = search.range ?? "30";
+  const rangeDays = RANGE_OPTIONS.find((option) => option.value === rangeValue)?.days ?? null;
+  const minSampleSize = search.min ?? 5;
+  const dimension = (search.by ?? "setup") as BreakdownDimension;
   // A non-empty custom range always takes priority over the preset buttons —
   // set together, they'd disagree about what's selected, so picking a custom
-  // range clears `rangeDays` down to "not a preset" instead of leaving a
-  // preset visually highlighted for a range it no longer describes.
-  const [customRange, setCustomRange] = useState<{ from: string; to: string }>({ from: "", to: "" });
-  const [minSampleSize, setMinSampleSize] = useState(5);
-  const [dimension, setDimension] = useState<BreakdownDimension>("setup");
-
+  // range shows no preset as highlighted instead of highlighting one for a
+  // range it no longer describes.
+  const customRange = { from: search.from ?? "", to: search.to ?? "" };
   const hasCustomRange = customRange.from !== "" || customRange.to !== "";
 
   // The actual [start, end] window every chart/metric on this page filters
-  // to. Previously only the preset buttons existed — there was no way to
-  // ask "how did I do in the first two weeks of March" without scrolling
-  // through the journal by hand.
-  const { rangeStart, rangeEnd } = useMemo(() => {
-    const today = startOfDay(new Date());
-    if (hasCustomRange) {
-      const earliestTrade = allTrades.reduce<Date | null>((earliest, t) => {
-        const opened = startOfDay(new Date(t.opened_at));
-        return !earliest || opened < earliest ? opened : earliest;
-      }, null);
-      return {
-        rangeStart: customRange.from ? startOfDay(new Date(customRange.from)) : (earliestTrade ?? today),
-        rangeEnd: customRange.to ? startOfDay(new Date(customRange.to)) : today,
-      };
-    }
-    if (rangeDays == null) {
-      const earliestTrade = allTrades.reduce<Date | null>((earliest, t) => {
-        const opened = startOfDay(new Date(t.opened_at));
-        return !earliest || opened < earliest ? opened : earliest;
-      }, null);
-      return { rangeStart: earliestTrade ?? subDays(today, 30), rangeEnd: today };
-    }
-    return { rangeStart: subDays(today, rangeDays - 1), rangeEnd: today };
-  }, [hasCustomRange, customRange, rangeDays, allTrades]);
+  // to, as local calendar days (the browser knows the person's time zone; the
+  // server just receives the resulting instants).
+  const accountId = workspace?.activeAccount?.id;
+  const today = startOfDay(new Date());
+  // Only the "All" range (or a custom range with no start) needs to know where
+  // the journal begins — one cheap server lookup, not a download of every trade.
+  const needsEarliest = hasCustomRange ? customRange.from === "" : rangeDays == null;
+  const earliestQuery = useQuery({ ...earliestTradeQueryOptions(activePortfolioId, accountId), enabled: needsEarliest });
+  const earliestTrade = earliestQuery.data ? startOfDay(new Date(earliestQuery.data)) : null;
+  let rangeStart: Date;
+  let rangeEnd: Date;
+  if (hasCustomRange) {
+    rangeStart = customRange.from ? startOfDay(new Date(customRange.from)) : (earliestTrade ?? today);
+    rangeEnd = customRange.to ? startOfDay(new Date(customRange.to)) : today;
+  } else if (rangeDays == null) {
+    rangeStart = earliestTrade ?? subDays(today, 30);
+    rangeEnd = today;
+  } else {
+    rangeStart = subDays(today, rangeDays - 1);
+    rangeEnd = today;
+  }
 
-  const trades = useMemo(() => {
-    const startMs = rangeStart.getTime();
-    const endMs = rangeEnd.getTime() + 24 * 60 * 60 * 1000 - 1; // inclusive of the end day
-    return allTrades.filter((t) => {
-      const openedMs = new Date(t.opened_at).getTime();
-      return openedMs >= startMs && openedMs <= endMs;
-    });
-  }, [allTrades, rangeStart, rangeEnd]);
-
-  const closedTrades = useMemo(() => trades.filter((t) => t.status === "closed" && t.net_pnl != null), [trades]);
   const startingEquity = workspace?.startingEquity ?? 50000;
+  const rangeReady = !needsEarliest || !earliestQuery.isPending;
+  // The server filters, crunches and returns the finished report — see
+  // analytics.functions.ts. Nothing here scales with the size of the journal.
+  const reportQuery = useQuery(
+    analyticsReportQueryOptions(
+      workspace && rangeReady
+        ? {
+            portfolioId: workspace.activePortfolio.id,
+            accountId,
+            startingEquity,
+            currency,
+            rangeStart: rangeStart.toISOString(),
+            rangeEnd: new Date(rangeEnd.getTime() + 24 * 60 * 60 * 1000 - 1).toISOString(), // inclusive of the end day
+            minSampleSize,
+            dimension,
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          }
+        : undefined,
+    ),
+  );
+  const report = reportQuery.data;
 
-  const enrichedTrades = useMemo(
-    () => enrichTrades(trades, reviewsQuery.data ?? [], tagLinksQuery.data ?? [], tagsQuery.data ?? []),
-    [trades, reviewsQuery.data, tagLinksQuery.data, tagsQuery.data],
-  );
-
-  const breakdownGroups = useMemo(
-    () => computeBreakdown(enrichedTrades, dimension, startingEquity, minSampleSize),
-    [enrichedTrades, dimension, startingEquity, minSampleSize],
-  );
-
-  const rDistribution = useMemo(() => computeRDistribution(closedTrades), [closedTrades]);
-  const streakDistribution = useMemo(() => computeStreakDistribution(closedTrades), [closedTrades]);
-  const sessionGroups = useMemo(() => computeBreakdown(enrichedTrades, "session", startingEquity, 1), [enrichedTrades, startingEquity]);
-
-  const equityCurve = useMemo(
-    () =>
-      buildEquityCurve(
-        closedTrades.map((t) => ({ id: t.id, symbol: t.symbol, netPnl: t.net_pnl, openedAt: t.opened_at, closedAt: t.closed_at })),
-        startingEquity,
-        { width: 900, height: 240 },
-      ),
-    [closedTrades, startingEquity],
-  );
-
-  const analyticsInput: ClosedTradeForAnalytics[] = useMemo(
-    () =>
-      closedTrades.map((t) => ({
-        id: t.id,
-        netPnl: t.net_pnl ?? 0,
-        realizedRMultiple: t.realized_r_multiple,
-        curatedLabel: t.curated_label === "curated" ? "curated" : "impulse",
-        openedAt: t.opened_at,
-        closedAt: t.closed_at,
-      })),
-    [closedTrades],
-  );
-  const overall = useMemo(() => summarizeClosedTrades(analyticsInput, startingEquity), [analyticsInput, startingEquity]);
-  const ratioMetrics = useMemo(
-    () => computeRatioMetrics(closedTrades, overall.netPnl, overall.maxDrawdownDollars),
-    [closedTrades, overall.netPnl, overall.maxDrawdownDollars],
-  );
-  const insights = useMemo(
-    () => generateInsights(enrichedTrades, startingEquity, minSampleSize, overall),
-    [enrichedTrades, startingEquity, minSampleSize, overall],
-  );
-  const curatedOnly = useMemo(
-    () => summarizeClosedTrades(analyticsInput.filter((t) => t.curatedLabel === "curated"), startingEquity),
-    [analyticsInput, startingEquity],
-  );
-  const impulseOnly = useMemo(
-    () => summarizeClosedTrades(analyticsInput.filter((t) => t.curatedLabel === "impulse"), startingEquity),
-    [analyticsInput, startingEquity],
-  );
-
-  // Daily P&L, keyed by day — spans whatever [rangeStart, rangeEnd] the page
-  // is currently filtered to (see PnlHeatmap for the calendar-grid layout).
-  const pnlByDay = useMemo(() => {
-    const byDay = new Map<string, number>();
-    for (const trade of closedTrades) {
-      const key = format(new Date(trade.closed_at ?? trade.opened_at), "yyyy-MM-dd");
-      byDay.set(key, (byDay.get(key) ?? 0) + (trade.net_pnl ?? 0));
-    }
-    return byDay;
-  }, [closedTrades]);
-
-  if (workspaceQuery.isLoading || !workspace) {
+  if (!workspace) {
     return <p className="py-10 text-center text-sm text-muted-foreground">Loading analytics…</p>;
   }
 
@@ -216,7 +144,9 @@ function AnalyticsPage() {
               min={1}
               max={100}
               value={minSampleSize}
-              onChange={(e) => setMinSampleSize(Math.max(1, Number(e.target.value) || 1))}
+              onChange={(e) =>
+                void navigate({ search: (prev) => ({ ...prev, min: Math.max(1, Number(e.target.value) || 1) }), replace: true })
+              }
               className="h-8 w-16 font-mono"
             />
           </div>
@@ -224,14 +154,16 @@ function AnalyticsPage() {
             {RANGE_OPTIONS.map((option) => (
               <Button
                 key={option.label}
-                variant={!hasCustomRange && rangeDays === option.days ? "secondary" : "ghost"}
+                variant={!hasCustomRange && rangeValue === option.value ? "secondary" : "ghost"}
                 size="sm"
-                onClick={() => {
-                  setRangeDays(option.days);
-                  setCustomRange({ from: "", to: "" });
-                }}
+                onClick={() =>
+                  void navigate({
+                    search: (prev) => ({ ...prev, range: option.value, from: undefined, to: undefined }),
+                    replace: true,
+                  })
+                }
                 role="tab"
-                aria-selected={!hasCustomRange && rangeDays === option.days}
+                aria-selected={!hasCustomRange && rangeValue === option.value}
               >
                 {option.label}
               </Button>
@@ -240,21 +172,57 @@ function AnalyticsPage() {
           <DateRangePicker
             from={customRange.from}
             to={customRange.to}
-            onChange={setCustomRange}
+            onChange={({ from, to }) =>
+              void navigate({ search: (prev) => ({ ...prev, from: from || undefined, to: to || undefined }), replace: true })
+            }
             placeholder="Custom range"
             className="h-8 w-auto"
           />
         </div>
       </section>
 
-      {tradesQuery.isLoading ? (
+      {!report ? (
         <div className="surface-panel py-16 text-center text-sm text-muted-foreground">Loading analytics…</div>
-      ) : closedTrades.length === 0 ? (
+      ) : report.closedCount === 0 ? (
         <div className="surface-panel py-16 text-center text-sm text-muted-foreground">
           No closed trades in this range yet.
         </div>
       ) : (
-        <>
+        <div className={`transition-opacity ${reportQuery.isFetching ? "opacity-60" : ""}`} aria-busy={reportQuery.isFetching}>
+          <ReportView
+              report={report}
+            currency={currency}
+            dimension={dimension}
+            rangeStart={rangeStart}
+            rangeEnd={rangeEnd}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
+/** The report itself. Receives the finished numbers from the server, so it is
+ * pure presentation — nothing here recomputes from trades. */
+function ReportView({
+  report,
+  currency,
+  dimension,
+  rangeStart,
+  rangeEnd,
+}: {
+  report: AnalyticsReport;
+  currency: string;
+  dimension: BreakdownDimension;
+  rangeStart: Date;
+  rangeEnd: Date;
+}) {
+  const navigate = Route.useNavigate();
+  const { overall, ratioMetrics, equityCurve, insights, rDistribution, curatedOnly, impulseOnly, breakdownGroups, sessionGroups, streakDistribution } = report;
+  const pnlByDay = new Map(report.pnlByDay);
+  const minSampleSize = Route.useSearch({ select: (search) => search.min ?? 5 });
+  return (
+    <>
           {insights.length > 0 && (
             <div className="mb-6">
               <InsightCards insights={insights} />
@@ -264,8 +232,8 @@ function AnalyticsPage() {
           <section className="metric-grid mb-6" aria-label="Overall performance">
             <MetricCard
               label="Net P&L"
-              value={`${overall.netPnl >= 0 ? "" : "−"}$${Math.abs(overall.netPnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-              change={`${closedTrades.length} closed`}
+              value={formatSignedMoney(overall.netPnl, currency)}
+              change={`${report.closedCount} closed`}
               detail="in range"
               positive={overall.netPnl >= 0}
               icon={<Wallet />}
@@ -281,7 +249,7 @@ function AnalyticsPage() {
             <MetricCard
               label="Avg R"
               value={overall.averageRMultiple != null ? `${overall.averageRMultiple >= 0 ? "+" : ""}${overall.averageRMultiple.toFixed(2)}R` : "—"}
-              change={`$${(overall.averageWin ?? 0).toFixed(0)} / $${(overall.averageLoss ?? 0).toFixed(0)}`}
+              change={`${formatMoney(overall.averageWin ?? 0, currency)} / ${formatMoney(overall.averageLoss ?? 0, currency)}`}
               detail="avg win / avg loss"
               positive={(overall.averageRMultiple ?? 0) >= 0}
               icon={<TrendingUp />}
@@ -310,6 +278,7 @@ function AnalyticsPage() {
               labels={equityCurve.labels}
               width={equityCurve.width}
               height={equityCurve.height}
+              currency={currency}
             />
           </section>
 
@@ -394,11 +363,12 @@ function AnalyticsPage() {
               pnlByDay={pnlByDay}
               start={rangeStart}
               end={rangeEnd}
+              currency={currency}
               onSelectDay={(iso) => void navigate({ to: "/app/journal", search: { from: iso, to: iso } })}
             />
           </section>
 
-          <SessionBreakdownPanel groups={sessionGroups} />
+          <SessionBreakdownPanel groups={sessionGroups} currency={currency} />
 
           <section className="mt-6 grid gap-6 md:grid-cols-2">
             <div className="surface-panel space-y-4">
@@ -433,13 +403,13 @@ function AnalyticsPage() {
               <p className="eyebrow">&nbsp;</p>
               <ComparisonBar
                 label="Expectancy per trade"
-                left={{ label: "Curated", value: curatedOnly.expectancy ?? 0, display: `$${(curatedOnly.expectancy ?? 0).toFixed(0)}`, tone: "positive" }}
-                right={{ label: "Impulse", value: impulseOnly.expectancy ?? 0, display: `$${(impulseOnly.expectancy ?? 0).toFixed(0)}`, tone: "negative" }}
+                left={{ label: "Curated", value: curatedOnly.expectancy ?? 0, display: formatMoney(curatedOnly.expectancy ?? 0, currency), tone: "positive" }}
+                right={{ label: "Impulse", value: impulseOnly.expectancy ?? 0, display: formatMoney(impulseOnly.expectancy ?? 0, currency), tone: "negative" }}
               />
               <ComparisonBar
                 label="Net P&L"
-                left={{ label: "Curated", value: curatedOnly.netPnl, display: `$${curatedOnly.netPnl.toFixed(0)}`, tone: "positive" }}
-                right={{ label: "Impulse", value: impulseOnly.netPnl, display: `$${impulseOnly.netPnl.toFixed(0)}`, tone: "negative" }}
+                left={{ label: "Curated", value: curatedOnly.netPnl, display: formatMoney(curatedOnly.netPnl, currency), tone: "positive" }}
+                right={{ label: "Impulse", value: impulseOnly.netPnl, display: formatMoney(impulseOnly.netPnl, currency), tone: "negative" }}
               />
             </div>
           </section>
@@ -447,17 +417,16 @@ function AnalyticsPage() {
           <section className="mt-6">
             <BreakdownExplorer
               dimension={dimension}
-              onDimensionChange={setDimension}
+              onDimensionChange={(by) => void navigate({ search: (prev) => ({ ...prev, by }), replace: true })}
               groups={breakdownGroups}
               minSampleSize={minSampleSize}
+              currency={currency}
             />
           </section>
 
           <section className="mt-6">
             <StreakDistributionCard distribution={streakDistribution} />
           </section>
-        </>
-      )}
     </>
   );
 }

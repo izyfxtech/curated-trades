@@ -5,15 +5,20 @@
 // trade" can never silently drift into different math. Sizing is in lots for
 // forex/metals and plain units for anything else, same rule as everywhere
 // else in the app (see instruments.ts).
+//
+// The inputs are a TanStack Form whose defaults come from the workspace the
+// route loader has already fetched (no "initialize once" effect), and the
+// result is computed straight from the live form values.
+import { useSuspenseQuery } from "@tanstack/react-query";
+import { useStore } from "@tanstack/react-form";
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
 import { Calculator } from "lucide-react";
 
-import { Input } from "@/components/ui/input";
-import { getWorkspace } from "@/lib/portfolios.functions";
-import { calculateRiskPreview } from "@/lib/trade-calc";
+import { InstrumentSelect } from "@/components/journal/InstrumentSelect";
+import { formProps, useAppForm } from "@/lib/form";
 import { buildSizingContext, getInstrumentSpec, needsQuoteRate, sizeLabel } from "@/lib/instruments";
+import { workspaceQueryOptions } from "@/lib/queries";
+import { calculateRiskPreview } from "@/lib/trade-calc";
 
 export const Route = createFileRoute("/app/risk-calculator")({
   head: () => ({
@@ -22,45 +27,54 @@ export const Route = createFileRoute("/app/risk-calculator")({
       { name: "description", content: "Work out position size in lots, risk amount, and planned R:R before you enter a trade." },
     ],
   }),
+  // Already cached by the /app layout; this just makes the dependency explicit
+  // so the form below can seed itself synchronously.
+  loader: ({ context }) => context.queryClient.ensureQueryData(workspaceQueryOptions),
   component: RiskCalculatorPage,
 });
 
+type CalcValues = {
+  symbol: string;
+  equity: string;
+  riskPercent: string;
+  entry: string;
+  stop: string;
+  target: string;
+  quoteRate: string;
+};
+
 function RiskCalculatorPage() {
-  const workspaceQuery = useQuery({ queryKey: ["workspace"], queryFn: () => getWorkspace() });
-  const workspace = workspaceQuery.data;
+  const { data: workspace } = useSuspenseQuery(workspaceQueryOptions);
 
-  const [symbol, setSymbol] = useState("EURUSD");
-  const [equity, setEquity] = useState("");
-  const [riskPercent, setRiskPercent] = useState("");
-  const [entry, setEntry] = useState("");
-  const [stop, setStop] = useState("");
-  const [target, setTarget] = useState("");
-  const [quoteRate, setQuoteRate] = useState("");
-  const [initialized, setInitialized] = useState(false);
+  const form = useAppForm({
+    defaultValues: {
+      symbol: "EURUSD",
+      // workspace.liveEquity (starting_equity + closed-trade P&L), not
+      // activePortfolio.current_equity — that column is written once at
+      // portfolio creation and never updated, so it goes stale the moment the
+      // first trade closes. See DECISIONS.md #31.
+      equity: String(workspace.liveEquity),
+      riskPercent: String(workspace.activeAccount?.default_risk_percent ?? workspace.accounts[0]?.default_risk_percent ?? 1),
+      entry: "",
+      stop: "",
+      target: "",
+      quoteRate: "",
+    } as CalcValues,
+  });
+  const values = useStore(form.store, (state) => state.values);
 
-  useEffect(() => {
-    if (!workspace || initialized) return;
-    // workspace.liveEquity (starting_equity + closed-trade P&L), not
-    // activePortfolio.current_equity — that column is written once at
-    // portfolio creation and never updated, so it goes stale the moment the
-    // first trade closes. See DECISIONS.md #31.
-    setEquity(String(workspace.liveEquity));
-    setRiskPercent(String(workspace.activeAccount?.default_risk_percent ?? workspace.accounts[0]?.default_risk_percent ?? 1));
-    setInitialized(true);
-  }, [workspace, initialized]);
-
-  const accountCurrency = (workspace?.activeAccount?.base_currency ?? workspace?.accounts[0]?.base_currency ?? "USD").toUpperCase();
-  const spec = getInstrumentSpec(symbol || "EURUSD");
+  const accountCurrency = (workspace.activeAccount?.base_currency ?? workspace.accounts[0]?.base_currency ?? "USD").toUpperCase();
+  const spec = getInstrumentSpec(values.symbol || "EURUSD");
   const sizeText = sizeLabel(spec);
-  const askForQuoteRate = symbol.trim() !== "" && needsQuoteRate(spec, accountCurrency);
-  const quoteRateNum = quoteRate !== "" ? Number(quoteRate) : null;
+  const askForQuoteRate = values.symbol.trim() !== "" && needsQuoteRate(spec, accountCurrency);
+  const quoteRateNum = values.quoteRate !== "" ? Number(values.quoteRate) : null;
 
-  const result = useMemo(() => {
-    const equityNum = Number(equity);
-    const riskNum = Number(riskPercent);
-    const entryNum = Number(entry);
-    const stopNum = Number(stop);
-    const targetNum = target === "" ? null : Number(target);
+  const result = (() => {
+    const equityNum = Number(values.equity);
+    const riskNum = Number(values.riskPercent);
+    const entryNum = Number(values.entry);
+    const stopNum = Number(values.stop);
+    const targetNum = values.target === "" ? null : Number(values.target);
 
     const inputsValid =
       Number.isFinite(equityNum) && equityNum > 0 &&
@@ -74,7 +88,7 @@ function RiskCalculatorPage() {
     let sizing;
     if (spec.sizeUnit === "lots") {
       try {
-        sizing = buildSizingContext({ symbol, accountCurrency, quoteRate: quoteRateNum });
+        sizing = buildSizingContext({ symbol: values.symbol, accountCurrency, quoteRate: quoteRateNum });
       } catch {
         return null; // cross pair, rate not entered yet — the field below asks for it
       }
@@ -94,7 +108,7 @@ function RiskCalculatorPage() {
         : null;
 
     return { preview, plannedR };
-  }, [equity, riskPercent, entry, stop, target, symbol, accountCurrency, quoteRateNum, spec.sizeUnit]);
+  })();
 
   return (
     <>
@@ -107,76 +121,57 @@ function RiskCalculatorPage() {
       </section>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
-        <div className="surface-panel space-y-5">
+        <form {...formProps(form)} className="surface-panel space-y-5">
           <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label htmlFor="rc-symbol" className="field-label">
-                Instrument
-              </label>
-              <Input
-                id="rc-symbol"
-                className="font-mono uppercase"
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
-                placeholder="EURUSD"
-              />
-            </div>
-            <div>
-              <label htmlFor="rc-equity" className="field-label">
-                Account equity ({accountCurrency})
-              </label>
-              <Input id="rc-equity" type="number" step="any" className="font-mono" value={equity} onChange={(e) => setEquity(e.target.value)} />
-            </div>
+            <form.AppField name="symbol">
+              {(field) => (
+                <div>
+                  <label htmlFor="rc-symbol" className="field-label">
+                    Instrument
+                  </label>
+                  <InstrumentSelect id="rc-symbol" value={field.state.value} onChange={field.handleChange} />
+                </div>
+              )}
+            </form.AppField>
+            <form.AppField name="equity">
+              {(field) => <field.TextField id="rc-equity" label={`Account equity (${accountCurrency})`} type="number" step="any" className="font-mono" />}
+            </form.AppField>
           </div>
 
-          <div>
-            <label htmlFor="rc-risk" className="field-label">
-              Risk per trade (%)
-            </label>
-            <Input id="rc-risk" type="number" step="any" className="font-mono max-w-40" value={riskPercent} onChange={(e) => setRiskPercent(e.target.value)} />
-          </div>
+          <form.AppField name="riskPercent">
+            {(field) => <field.TextField id="rc-risk" label="Risk per trade (%)" type="number" step="any" className="max-w-40 font-mono" />}
+          </form.AppField>
 
           <div className="grid grid-cols-3 gap-4">
-            <div>
-              <label htmlFor="rc-entry" className="field-label">
-                Entry price
-              </label>
-              <Input id="rc-entry" type="number" step="any" className="font-mono" value={entry} onChange={(e) => setEntry(e.target.value)} />
-            </div>
-            <div>
-              <label htmlFor="rc-stop" className="field-label">
-                Stop loss
-              </label>
-              <Input id="rc-stop" type="number" step="any" className="font-mono" value={stop} onChange={(e) => setStop(e.target.value)} />
-            </div>
-            <div>
-              <label htmlFor="rc-target" className="field-label">
-                Take profit
-              </label>
-              <Input id="rc-target" type="number" step="any" className="font-mono" placeholder="Optional" value={target} onChange={(e) => setTarget(e.target.value)} />
-            </div>
+            <form.AppField name="entry">
+              {(field) => <field.TextField id="rc-entry" label="Entry price" type="number" step="any" className="font-mono" />}
+            </form.AppField>
+            <form.AppField name="stop">
+              {(field) => <field.TextField id="rc-stop" label="Stop loss" type="number" step="any" className="font-mono" />}
+            </form.AppField>
+            <form.AppField name="target">
+              {(field) => <field.TextField id="rc-target" label="Take profit" type="number" step="any" className="font-mono" placeholder="Optional" />}
+            </form.AppField>
           </div>
 
           {askForQuoteRate && (
             <div className="border-t border-border pt-5">
-              <label htmlFor="rc-quote-rate" className="field-label">
-                {accountCurrency} value of 1 {spec.quote}
-              </label>
-              <Input
-                id="rc-quote-rate"
-                type="number"
-                step="any"
-                className="font-mono max-w-40"
-                value={quoteRate}
-                onChange={(e) => setQuoteRate(e.target.value)}
-                placeholder={spec.quote === "JPY" ? "0.0067" : "1.27"}
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                {spec.symbol} is priced in {spec.quote}, not {accountCurrency} — this converts the result.
-              </p>
+              <form.AppField name="quoteRate">
+                {(field) => (
+                  <field.TextField
+                    id="rc-quote-rate"
+                    label={`${accountCurrency} value of 1 ${spec.quote}`}
+                    type="number"
+                    step="any"
+                    className="max-w-40 font-mono"
+                    placeholder={spec.quote === "JPY" ? "0.0067" : "1.27"}
+                    hint={`${spec.symbol} is priced in ${spec.quote}, not ${accountCurrency} — this converts the result.`}
+                  />
+                )}
+              </form.AppField>
             </div>
           )}
-        </div>
+        </form>
 
         <div className="surface-panel">
           <div className="panel-heading">

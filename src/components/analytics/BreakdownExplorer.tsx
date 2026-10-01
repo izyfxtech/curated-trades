@@ -12,17 +12,20 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { BREAKDOWN_DIMENSIONS, type BreakdownDimension, type BreakdownGroup } from "@/lib/analytics";
+import { formatSignedMoney } from "@/lib/money";
 
 export function BreakdownExplorer({
   dimension,
   onDimensionChange,
   groups,
   minSampleSize,
+  currency = "USD",
 }: {
   dimension: BreakdownDimension;
   onDimensionChange: (dimension: BreakdownDimension) => void;
   groups: BreakdownGroup[];
   minSampleSize: number;
+  currency?: string;
 }) {
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -77,7 +80,7 @@ export function BreakdownExplorer({
                     {group.stats.winRate != null ? `${group.stats.winRate}% win` : "—"}
                   </span>
                   <span className={`font-mono font-semibold ${positive ? "text-chart-2" : "text-destructive"}`}>
-                    ${group.stats.netPnl.toFixed(0)}
+                    {formatSignedMoney(group.stats.netPnl, currency)}
                   </span>
                 </button>
                 <div className="col-span-full ml-6 mr-2 h-1.5 overflow-hidden rounded-sm bg-muted">
@@ -115,7 +118,7 @@ export function BreakdownExplorer({
                             <td
                               className={`font-mono font-semibold ${(trade.net_pnl ?? 0) >= 0 ? "text-chart-2" : "text-destructive"}`}
                             >
-                              ${(trade.net_pnl ?? 0).toFixed(0)}
+                              {formatSignedMoney(trade.net_pnl ?? 0, currency)}
                             </td>
                           </tr>
                         ))}

@@ -1,3 +1,5 @@
+import { formatMoneyCompact } from "@/lib/money";
+
 // Chart-layout math for the equity curve (SVG coordinate mapping), kept
 // separate from trade-calc.ts on purpose — that file is per-trade financial
 // math, this is presentation math for a specific chart. Same separation
@@ -34,8 +36,9 @@ export interface EquityCurveResult {
 export function buildEquityCurve(
   closedTrades: ClosedTradeForEquityCurve[],
   startingEquity: number,
-  options: { width?: number; height?: number } = {},
+  options: { width?: number; height?: number; currency?: string } = {},
 ): EquityCurveResult {
+  const currency = options.currency ?? "USD";
   const width = options.width ?? 630;
   const height = options.height ?? 170;
   const padTop = 14;
@@ -74,7 +77,7 @@ export function buildEquityCurve(
     netPnl: point.netPnl,
   }));
 
-  const labels = [max, min + range * 0.66, min + range * 0.33, min].map((value) => `$${Math.round(value / 1000)}k`);
+  const labels = [max, min + range * 0.66, min + range * 0.33, min].map((value) => formatMoneyCompact(value, currency));
 
   return {
     points,
@@ -84,4 +87,41 @@ export function buildEquityCurve(
     width,
     height,
   };
+}
+
+/** Thins an equity curve to roughly `maxPoints` vertices for sending over the
+ * wire / drawing, without changing what it looks like.
+ *
+ * A journal with 20,000 trades has a 20,000-point curve — far more vertices
+ * than the ~900px-wide chart can show. Each point keeps its original x/y, so
+ * the geometry is untouched; what's dropped is points that sit between other
+ * points on a visually identical line. Within each bucket of consecutive
+ * points we keep the *highest*, the *lowest* and the *last*, so no peak or
+ * drawdown trough is ever smoothed away (the y-scale and labels come from the
+ * full series before this runs). Curves already under the limit are returned
+ * unchanged — normal journals see no difference at all. */
+export function downsampleEquityCurve(curve: EquityCurveResult, maxPoints = 600): EquityCurveResult {
+  const { points } = curve;
+  if (points.length <= maxPoints) return curve;
+
+  const bucketCount = Math.max(1, Math.floor(maxPoints / 3));
+  const bucketSize = points.length / bucketCount;
+  const keep = new Set<number>([0, points.length - 1]);
+  for (let b = 0; b < bucketCount; b++) {
+    const start = Math.floor(b * bucketSize);
+    const end = Math.min(points.length, Math.floor((b + 1) * bucketSize));
+    if (end <= start) continue;
+    let lo = start;
+    let hi = start;
+    for (let i = start; i < end; i++) {
+      if (points[i]!.value < points[lo]!.value) lo = i;
+      if (points[i]!.value > points[hi]!.value) hi = i;
+    }
+    keep.add(lo);
+    keep.add(hi);
+    keep.add(end - 1);
+  }
+
+  const kept = [...keep].sort((a, b) => a - b).map((index) => points[index]!);
+  return { ...curve, points: kept, polyline: kept.map((p) => `${p.x},${p.y}`).join(" ") };
 }

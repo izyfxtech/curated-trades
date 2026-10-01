@@ -44,38 +44,25 @@ async function withSignedUrls(
   return rows.map((row) => ({ ...row, signedUrl: urlByPath.get(row.storage_path) ?? null }));
 }
 
-/** Lightweight trade_id list (no signed URLs) for computing per-row attachment counts on the dashboard. */
-/** Scoped the same way as listTradeTagLinks (see its comment) — trade_attachments has no portfolio_id column either. */
-export const listAttachmentTradeIds = createServerFn({ method: "GET" })
+/** Screenshots (with signed URLs) for a specific set of trades — the Journal's
+ * gallery view asks for just the trades on the page it is showing. The old
+ * version fetched and signed every attachment in the whole portfolio on each
+ * visit (thousands of URLs for a long-running journal, and silently capped at
+ * 1,000 rows besides). */
+export const listAttachmentsForTrades = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
-  .validator(z.object({ portfolioId: z.string().uuid().optional() }))
-  .handler(async ({ context, data }): Promise<{ trade_id: string }[]> => {
-    const { supabase, userId } = context;
-    let query = supabase.from("trade_attachments").select("trade_id, trades!inner(portfolio_id)").eq("owner_id", userId);
-    if (data.portfolioId) {
-      query = query.eq("trades.portfolio_id", data.portfolioId);
-    }
-    const { data: rows, error } = await query;
-    if (error) throw new Error(error.message);
-    return (rows ?? []).map((row) => ({ trade_id: row.trade_id }));
-  });
-
-/** All attachments (with signed URLs) for a portfolio at once — used by the Journal's screenshot gallery view, one query instead of one per trade. */
-export const listAttachmentsForPortfolio = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
-  .validator(z.object({ portfolioId: z.string().uuid() }))
+  .validator(z.object({ tradeIds: z.array(z.string().uuid()).max(1000) }))
   .handler(async ({ context, data }): Promise<AttachmentWithUrl[]> => {
     const { supabase, userId } = context;
+    if (data.tradeIds.length === 0) return [];
     const { data: rows, error } = await supabase
       .from("trade_attachments")
-      .select("*, trades!inner(portfolio_id)")
+      .select("*")
       .eq("owner_id", userId)
-      .eq("trades.portfolio_id", data.portfolioId)
+      .in("trade_id", data.tradeIds)
       .order("created_at", { ascending: true });
     if (error) throw new Error(error.message);
-
-    const plain = (rows ?? []).map(({ trades: _trades, ...row }) => row as AttachmentRow);
-    return withSignedUrls(supabase, plain);
+    return withSignedUrls(supabase, rows ?? []);
   });
 
 export const listAttachments = createServerFn({ method: "GET" })

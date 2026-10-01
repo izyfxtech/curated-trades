@@ -4,6 +4,8 @@
 // there's exactly one cache, not one per route.
 import { QueryClient } from "@tanstack/react-query";
 import { createRouter } from "@tanstack/react-router";
+import { supabase } from "@/integrations/supabase/client";
+import { sessionQueryOptions } from "@/lib/queries";
 import { routeTree } from "./routeTree.gen";
 
 export const getRouter = () => {
@@ -39,6 +41,29 @@ export const getRouter = () => {
     defaultPreload: "intent",
     defaultPreloadStaleTime: 0,
   });
+
+  // The one and only Supabase auth subscription in the app. It lives here —
+  // not in a component — because this is the only place that holds both the
+  // QueryClient (where the session is cached, see `sessionQueryOptions`) and
+  // the router (whose `beforeLoad` guards decide who may see what). Every
+  // sign-in, sign-out, token refresh and cross-tab auth change lands here, is
+  // written into the query cache, and — when the signed-in/out state itself
+  // changed — makes the router re-run its guards, which is what redirects
+  // someone out of /app after signing out (or into it after signing in).
+  // Browser only: a server render has no localStorage session to listen to.
+  if (!import.meta.env.SSR) {
+    supabase.auth.onAuthStateChange((event, session) => {
+      queryClient.setQueryData(sessionQueryOptions.queryKey, session);
+      if (event === "SIGNED_OUT") queryClient.removeQueries({ predicate: (q) => q.queryKey[0] !== "auth" });
+      if (event === "SIGNED_IN" || event === "SIGNED_OUT" || event === "USER_UPDATED") {
+        // Supabase warns against calling back into its own client from inside
+        // this callback (the auth lock is still held, so it can deadlock).
+        // Re-running the guards triggers loaders that read the session, so
+        // defer to after the callback returns.
+        setTimeout(() => void router.invalidate(), 0);
+      }
+    });
+  }
 
   return router;
 };

@@ -7,6 +7,7 @@
 import { ImageOff } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 
+import { formatSignedMoney } from "@/lib/money";
 import type { AttachmentWithUrl } from "@/lib/attachments.functions";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -16,10 +17,13 @@ export function TradeGallery({
   trades,
   attachments,
   isLoading,
+  currencyByAccountId,
 }: {
   trades: TradeRowData[];
   attachments: AttachmentWithUrl[];
   isLoading: boolean;
+  /** account_id → currency — cards can span accounts of different currencies when "All accounts" is selected. */
+  currencyByAccountId: Map<string, string>;
 }) {
   const navigate = useNavigate();
   const attachmentsByTradeId = new Map<string, AttachmentWithUrl[]>();
@@ -79,7 +83,7 @@ export function TradeGallery({
             <div className="p-3">
               <p className="text-sm font-semibold">{trade.symbol}</p>
               <p className={`font-mono text-xs font-medium ${netPnl >= 0 ? "text-chart-2" : "text-destructive"}`}>
-                {netPnl >= 0 ? "+" : "−"}${Math.abs(netPnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                {formatSignedMoney(netPnl, currencyByAccountId.get(trade.account_id) ?? "USD")}
               </p>
             </div>
           </button>

@@ -3,15 +3,22 @@
 // "/", "/sign-in", etc. Also doubles as the owner's own print preview (see
 // the "Preview" button on /app/reports) so there's exactly one report view
 // to keep polished, not two that can drift apart.
+//
+// The report is fetched by the route loader (client-side — each view bumps the
+// link's view counter, so it must run exactly once per visit, not once on the
+// server and again in the browser) and an invalid/expired/revoked link is the
+// route's `errorComponent`. The comment box is a TanStack Form.
+import { useMutation, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
 import { Printer } from "lucide-react";
+import { toast } from "sonner";
+import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { addCoachComment, getSharedReport } from "@/lib/public-share.functions";
+import { formProps, useAppForm } from "@/lib/form";
+import { formatMoney } from "@/lib/money";
+import { addCoachComment } from "@/lib/public-share.functions";
+import { sharedReportQueryOptions } from "@/lib/queries";
 
 export const Route = createFileRoute("/share/$token")({
   head: () => ({
@@ -20,11 +27,52 @@ export const Route = createFileRoute("/share/$token")({
       { name: "description", content: "A shared, read-only trading report." },
     ],
   }),
+  ssr: false,
+  loader: ({ context, params }) => context.queryClient.ensureQueryData(sharedReportQueryOptions(params.token)),
+  // A broken link shouldn't be retried or offer a "try again".
+  errorComponent: ({ error }) => (
+    <div className="mx-auto max-w-md px-6 py-24 text-center">
+      <p className="page-title mb-2">Link unavailable</p>
+      <p className="text-sm text-muted-foreground">
+        {error.message || "This link is invalid, expired, or has been revoked."}
+      </p>
+    </div>
+  ),
+  pendingComponent: () => <p className="py-20 text-center text-sm text-muted-foreground">Loading report…</p>,
   component: SharedReportPage,
 });
 
-function money(value: number): string {
-  return value.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+const commentSchema = z.object({
+  authorName: z.string().trim().min(1, "Enter your name"),
+  body: z.string().trim().min(1, "Write a comment first"),
+});
+
+function CommentForm({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const post = useMutation({
+    mutationFn: addCoachComment,
+    onSuccess: () => {
+      form.setFieldValue("body", "");
+      void queryClient.invalidateQueries({ queryKey: sharedReportQueryOptions(token).queryKey });
+    },
+    onError: (error) => toast.error(error.message || "Couldn't post comment"),
+  });
+  const form = useAppForm({
+    defaultValues: { authorName: "", body: "" },
+    validators: { onSubmit: commentSchema },
+    onSubmit: ({ value }) => post.mutate({ data: { token, authorName: value.authorName.trim(), body: value.body.trim() } }),
+  });
+  return (
+    <form {...formProps(form)} className="space-y-3">
+      <form.AppField name="authorName">{(field) => <field.TextField placeholder="Your name" />}</form.AppField>
+      <form.AppField name="body">{(field) => <field.TextareaField placeholder="Add a comment…" />}</form.AppField>
+      <form.AppForm>
+        <form.SubmitButton pendingLabel="Posting…" pending={post.isPending}>
+          Post comment
+        </form.SubmitButton>
+      </form.AppForm>
+    </form>
+  );
 }
 
 function StatTile({ label, value, detail }: { label: string; value: string; detail?: string }) {
@@ -58,47 +106,7 @@ function EquitySparkline({ points }: { points: { index: number; value: number }[
 
 function SharedReportPage() {
   const { token } = Route.useParams();
-  const queryClient = useQueryClient();
-  const [authorName, setAuthorName] = useState("");
-  const [commentBody, setCommentBody] = useState("");
-
-  const reportQuery = useQuery({
-    queryKey: ["shared-report", token],
-    queryFn: () => getSharedReport({ data: { token } }),
-    retry: false,
-  });
-
-  const commentMutation = useMutation({
-    mutationFn: addCoachComment,
-    onSuccess: () => {
-      setCommentBody("");
-      queryClient.invalidateQueries({ queryKey: ["shared-report", token] });
-    },
-  });
-
-  function handleSubmitComment(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (commentMutation.isPending) return;
-    if (!authorName.trim() || !commentBody.trim()) return;
-    commentMutation.mutate({ data: { token, authorName: authorName.trim(), body: commentBody.trim() } });
-  }
-
-  if (reportQuery.isLoading) {
-    return <p className="py-20 text-center text-sm text-muted-foreground">Loading report…</p>;
-  }
-
-  if (reportQuery.isError || !reportQuery.data) {
-    return (
-      <div className="mx-auto max-w-md px-6 py-24 text-center">
-        <p className="page-title mb-2">Link unavailable</p>
-        <p className="text-sm text-muted-foreground">
-          {reportQuery.error instanceof Error ? reportQuery.error.message : "This link is invalid, expired, or has been revoked."}
-        </p>
-      </div>
-    );
-  }
-
-  const report = reportQuery.data;
+  const { data: report } = useSuspenseQuery(sharedReportQueryOptions(token));
   const { stats } = report;
 
   return (
@@ -139,7 +147,7 @@ function SharedReportPage() {
             label="Max drawdown"
             value={stats.maxDrawdownPercent != null ? `${stats.maxDrawdownPercent.toFixed(1)}%` : "Not enough data"}
           />
-          {!report.hideDollarPnl && <StatTile label="Net P&L" value={money(stats.netPnl)} />}
+          {!report.hideDollarPnl && <StatTile label="Net P&L" value={formatMoney(stats.netPnl, report.currency)} />}
           {stats.currentStreak && (
             <StatTile
               label="Current streak"
@@ -179,7 +187,7 @@ function SharedReportPage() {
                     <td className="font-mono">{trade.realizedRMultiple != null ? `${trade.realizedRMultiple.toFixed(2)}R` : "—"}</td>
                     {!report.hideDollarPnl && (
                       <td className={`font-mono ${(trade.netPnl ?? 0) >= 0 ? "text-chart-2" : "text-destructive"}`}>
-                        {trade.netPnl != null ? money(trade.netPnl) : "—"}
+                        {trade.netPnl != null ? formatMoney(trade.netPnl, report.currency) : "—"}
                       </td>
                     )}
                   </tr>
@@ -206,13 +214,7 @@ function SharedReportPage() {
           </ul>
 
           {report.permission === "comment" ? (
-            <form onSubmit={handleSubmitComment} className="space-y-3">
-              <Input placeholder="Your name" value={authorName} onChange={(event) => setAuthorName(event.target.value)} />
-              <Textarea placeholder="Add a comment…" value={commentBody} onChange={(event) => setCommentBody(event.target.value)} />
-              <Button type="submit" disabled={commentMutation.isPending}>
-                {commentMutation.isPending ? "Posting…" : "Post comment"}
-              </Button>
-            </form>
+            <CommentForm token={token} />
           ) : (
             <p className="text-xs text-muted-foreground">Comments are disabled on this link.</p>
           )}

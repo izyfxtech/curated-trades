@@ -5,29 +5,57 @@
 // journal table row, or a screenshot-gallery card — all of those now link
 // straight here instead of opening the edit modal, which stays a distinct
 // action reachable from this page's own Edit button.
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+//
+// The trade and workspace are loaded by the route loader (so a bad id shows the
+// route's error screen instead of a half-rendered page), and whether the
+// review modal is open is the `?review=true` search param.
+import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { z } from "zod";
 import { ArrowDownRight, ArrowLeft, ArrowUpRight, Pencil, Target, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { getWorkspace } from "@/lib/portfolios.functions";
-import { deleteTrade, getTrade } from "@/lib/trades.functions";
-import { getTradeReview } from "@/lib/reviews.functions";
+import {
+  queryKeys,
+  tradeDetailQueryOptions,
+  tradeReviewQueryOptions,
+  workspaceQueryOptions,
+} from "@/lib/queries";
+import { deleteTrade } from "@/lib/trades.functions";
 import { calculateHoldingSeconds, detectSessionFallback } from "@/lib/trade-calc";
 import { formatDuration, formatTradeDate } from "@/components/journal/dashboard-widgets";
 import { PartialExitsPanel } from "@/components/journal/PartialExitsPanel";
 import { AttachmentsPanel } from "@/components/journal/AttachmentsPanel";
 import { displaySize, formatSize } from "@/lib/instruments";
 import { TradeReviewModal } from "@/components/reviews/TradeReviewModal";
+import { formatMoney, formatSignedMoney } from "@/lib/money";
 
 export const Route = createFileRoute("/app/journal/$tradeId")({
   head: () => ({
     meta: [{ title: "Trade — Curated Trades" }],
   }),
+  validateSearch: z.object({ review: z.boolean().optional() }),
+  loader: async ({ context, params }) => {
+    await Promise.all([
+      context.queryClient.ensureQueryData(workspaceQueryOptions),
+      context.queryClient.ensureQueryData(tradeDetailQueryOptions(params.tradeId)),
+    ]);
+  },
+  errorComponent: TradeNotFound,
   component: TradeDetailPage,
 });
+
+function TradeNotFound({ error }: { error: Error }) {
+  return (
+    <div className="surface-panel py-16 text-center">
+      <p className="mb-3 text-sm text-muted-foreground">{error.message || "Trade not found."}</p>
+      <Link to="/app/journal" className="text-sm text-primary hover:underline">
+        Back to Journal
+      </Link>
+    </div>
+  );
+}
 
 interface PlaybookChecklistSnapshotItem {
   prompt: string;
@@ -40,66 +68,28 @@ interface PlaybookSnapshot {
   checklist: PlaybookChecklistSnapshotItem[];
 }
 
-function money(value: number, currency: string): string {
-  const sign = value >= 0 ? "+" : "−";
-  const formatted = Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
-  try {
-    // Intl gives "$1,234" / "€1,234"; we only want the symbol/code, so pull it
-    // via formatToParts rather than reformatting the (already-rounded) amount.
-    const symbolPart = new Intl.NumberFormat(undefined, { style: "currency", currency })
-      .formatToParts(0)
-      .find((part) => part.type === "currency")?.value;
-    return `${sign}${symbolPart ?? currency + " "}${formatted}`;
-  } catch {
-    return `${sign}${formatted} ${currency}`;
-  }
-}
-
 function TradeDetailPage() {
   const { tradeId } = Route.useParams();
-  const navigate = useNavigate();
+  const navigate = Route.useNavigate();
+  const search = Route.useSearch();
   const queryClient = useQueryClient();
-  const [isReviewOpen, setIsReviewOpen] = useState(false);
+  const isReviewOpen = search.review === true;
+  const setReviewOpen = (open: boolean) =>
+    void navigate({ search: (prev) => ({ ...prev, review: open ? true : undefined }), replace: true });
 
-  const workspaceQuery = useQuery({ queryKey: ["workspace"], queryFn: () => getWorkspace() });
-  const workspace = workspaceQuery.data;
+  // Both already in cache — the loader awaited them.
+  const { data: workspace } = useSuspenseQuery(workspaceQueryOptions);
+  const { data: trade } = useSuspenseQuery(tradeDetailQueryOptions(tradeId));
 
-  const tradeQuery = useQuery({
-    queryKey: ["trade-detail", tradeId],
-    queryFn: () => getTrade({ data: { tradeId } }),
-  });
-  const trade = tradeQuery.data;
-
-  const reviewQuery = useQuery({
-    queryKey: ["trade-review", tradeId],
-    queryFn: () => getTradeReview({ data: { tradeId } }),
-    enabled: trade?.status === "closed",
-  });
+  const reviewQuery = useQuery({ ...tradeReviewQueryOptions(tradeId), enabled: trade.status === "closed" });
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteTrade({ data: { tradeId } }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["trades"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.trades() });
       void navigate({ to: "/app/journal" });
     },
   });
-
-  if (workspaceQuery.isLoading || tradeQuery.isLoading) {
-    return <p className="py-10 text-center text-sm text-muted-foreground">Loading trade…</p>;
-  }
-
-  if (tradeQuery.isError || !trade || !workspace) {
-    return (
-      <div className="surface-panel py-16 text-center">
-        <p className="mb-3 text-sm text-muted-foreground">
-          {tradeQuery.error instanceof Error ? tradeQuery.error.message : "Trade not found."}
-        </p>
-        <Link to="/app/journal" className="text-sm text-primary hover:underline">
-          Back to Journal
-        </Link>
-      </div>
-    );
-  }
 
   const accountCurrency = (workspace.accounts.find((account) => account.id === trade.account_id)?.base_currency ?? "USD").toUpperCase();
   const size = displaySize(trade);
@@ -161,7 +151,7 @@ function TradeDetailPage() {
         <div className="metric-card">
           <p className="eyebrow mb-2">Net P&amp;L</p>
           <p className={`metric-value ${netPnl >= 0 ? "text-chart-2" : "text-destructive"}`}>
-            {trade.status === "closed" ? money(netPnl, accountCurrency) : "—"}
+            {trade.status === "closed" ? formatSignedMoney(netPnl, accountCurrency) : "—"}
           </p>
         </div>
         <div className="metric-card">
@@ -207,7 +197,7 @@ function TradeDetailPage() {
             </div>
             <div className="flex justify-between">
               <dt className="text-muted-foreground">Fees</dt>
-              <dd className="font-mono">${trade.fees.toFixed(2)}</dd>
+              <dd className="font-mono">{formatMoney(trade.fees, accountCurrency, 2)}</dd>
             </div>
             {trade.confidence != null && (
               <div className="flex justify-between">
@@ -288,14 +278,14 @@ function TradeDetailPage() {
                     {review.lesson_learned}
                   </p>
                 )}
-                <Button variant="outline" size="sm" onClick={() => setIsReviewOpen(true)}>
+                <Button variant="outline" size="sm" onClick={() => setReviewOpen(true)}>
                   Edit review
                 </Button>
               </div>
             ) : (
               <div>
                 <p className="mb-3 text-sm text-muted-foreground">This trade hasn't been reviewed yet.</p>
-                <Button variant="outline" size="sm" onClick={() => setIsReviewOpen(true)}>
+                <Button variant="outline" size="sm" onClick={() => setReviewOpen(true)}>
                   Review this trade
                 </Button>
               </div>
@@ -317,10 +307,12 @@ function TradeDetailPage() {
       {isReviewOpen && (
         <TradeReviewModal
           trade={trade}
-          onClose={() => setIsReviewOpen(false)}
+          onClose={() => setReviewOpen(false)}
           onSaved={() => {
-            setIsReviewOpen(false);
-            void queryClient.invalidateQueries({ queryKey: ["trade-review", tradeId] });
+            setReviewOpen(false);
+            void queryClient.invalidateQueries({ queryKey: tradeReviewQueryOptions(tradeId).queryKey });
+            // Analytics and the Journal's reviewed flag read reviews too.
+            void queryClient.invalidateQueries({ queryKey: queryKeys.trades() });
           }}
         />
       )}

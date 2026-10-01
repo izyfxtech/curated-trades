@@ -1,6 +1,5 @@
 "use client";
 
-import * as React from "react";
 import { format, parseISO } from "date-fns";
 import { CalendarDays } from "lucide-react";
 import type { DateRange } from "react-day-picker";
@@ -30,11 +29,7 @@ export interface DateRangePickerProps {
 
 /** Range picker used everywhere a "from/to" date pair is needed (Journal filters, Reports share period). */
 export function DateRangePicker({ from, to, onChange, placeholder = "Any date", className }: DateRangePickerProps) {
-  const [open, setOpen] = React.useState(false);
-  const range: DateRange | undefined = React.useMemo(
-    () => (from || to ? { from: toDate(from), to: toDate(to) } : undefined),
-    [from, to],
-  );
+  const range: DateRange | undefined = from || to ? { from: toDate(from), to: toDate(to) } : undefined;
 
   const label =
     from && to
@@ -46,7 +41,7 @@ export function DateRangePicker({ from, to, onChange, placeholder = "Any date", 
           : placeholder;
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover>
       <PopoverTrigger asChild>
         <Button
           type="button"

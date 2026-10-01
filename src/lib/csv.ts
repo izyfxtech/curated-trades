@@ -1,54 +1,24 @@
-// Minimal RFC4180-ish CSV parser plus a normalizer that maps parsed rows onto
-// the same field shape trades.functions.ts's buildTradePayload expects — no
-// dependency needed for a well-bounded problem like this.
+// CSV in and out. Parsing and serializing are delegated to PapaParse (and the
+// download itself to file-saver); what remains here is the part that is
+// specific to this app: a normalizer that maps parsed rows onto the same field
+// shape trades.functions.ts's buildTradePayload expects.
+import { saveAs } from "file-saver";
+import Papa from "papaparse";
+
 import type { Direction, TradeStatus } from "@/lib/trade-calc";
 
+/** Parses CSV text into rows of cells (quotes, escaped quotes, CRLF and a
+ * leading BOM are PapaParse's problem, not ours). Blank lines are dropped. */
 export function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let inQuotes = false;
-  const len = text.length;
+  return Papa.parse<string[]>(text, { skipEmptyLines: "greedy" }).data;
+}
 
-  for (let i = 0; i < len; i++) {
-    const char = text.charAt(i);
-
-    if (inQuotes) {
-      if (char === '"') {
-        if (text.charAt(i + 1) === '"') {
-          field += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        field += char;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inQuotes = true;
-    } else if (char === ",") {
-      row.push(field);
-      field = "";
-    } else if (char === "\n") {
-      row.push(field);
-      rows.push(row);
-      row = [];
-      field = "";
-    } else if (char === "\r") {
-      // ignore — \r\n line endings are handled by the following \n
-    } else {
-      field += char;
-    }
-  }
-  if (field.length > 0 || row.length > 0) {
-    row.push(field);
-    rows.push(row);
-  }
-
-  return rows.filter((r) => r.length > 1 || r[0] !== "");
+/** Serializes rows to CSV and hands the browser a download. Used by every
+ * "Export CSV" button, so quoting/escaping is PapaParse's job in one place
+ * rather than a hand-built `"${cell}"` join per page. */
+export function downloadCsv(filename: string, header: string[], rows: unknown[][]) {
+  const csv = Papa.unparse({ fields: header, data: rows.map((row) => row.map((cell) => cell ?? "")) });
+  saveAs(new Blob([csv], { type: "text/csv;charset=utf-8" }), filename);
 }
 
 export interface NormalizedImportRow {

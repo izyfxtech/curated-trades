@@ -11,6 +11,7 @@ import {
   summarizeClosedTrades,
   type ClosedTradeForAnalytics,
 } from "@/lib/trade-calc";
+import { formatMoney, formatSignedMoney } from "@/lib/money";
 import type { Database } from "@/integrations/supabase/types";
 
 type TradeRow = Database["public"]["Tables"]["trades"]["Row"];
@@ -361,6 +362,7 @@ export function generateInsights(
   startingEquity: number,
   minSampleSize: number,
   overall: ReturnType<typeof summarizeClosedTrades>,
+  currency = "USD",
 ): InsightCard[] {
   if (overall.tradeCount < minSampleSize) return [];
 
@@ -387,7 +389,7 @@ export function generateInsights(
         insights.push({
           id: `${dimension}-${group.key}-warning`,
           tone: "warning",
-          text: `Negative expectancy (${expectancy >= 0 ? "+" : ""}$${expectancy.toFixed(0)}/trade) on ${dimensionLabel.toLowerCase()} "${group.label}" across ${group.stats.tradeCount} trades, while the portfolio overall is positive.`,
+          text: `Negative expectancy (${formatSignedMoney(expectancy, currency)}/trade) on ${dimensionLabel.toLowerCase()} "${group.label}" across ${group.stats.tradeCount} trades, while the portfolio overall is positive.`,
         });
         continue;
       }
@@ -396,7 +398,7 @@ export function generateInsights(
         insights.push({
           id: `${dimension}-${group.key}-strength`,
           tone: "positive",
-          text: `${dimensionLabel} "${group.label}" is a standout: $${expectancy.toFixed(0)} expectancy per trade across ${group.stats.tradeCount} trades, well above your $${overallExpectancy.toFixed(0)} average.`,
+          text: `${dimensionLabel} "${group.label}" is a standout: ${formatMoney(expectancy, currency)} expectancy per trade across ${group.stats.tradeCount} trades, well above your ${formatMoney(overallExpectancy, currency)} average.`,
         });
         continue;
       }

@@ -1,14 +1,16 @@
 // Public marketing landing page at "/". Signed-in visitors are bounced
-// straight to /app on mount (see the effect below) — this route is never the
-// dashboard itself, unlike the pre-restructure version of this app where "/"
-// and the dashboard were the same route.
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
+// straight to /app (via <Navigate>, once the cached session is known) — this
+// route is never the dashboard itself, unlike the pre-restructure version of
+// this app where "/" and the dashboard were the same route. It stays
+// server-rendered (it's the marketing page), so the bounce can't be a
+// `beforeLoad` guard: the session only exists in the browser.
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
 import { ArrowRight, Moon, Sun } from "lucide-react";
+import { useTheme } from "next-themes";
 
 import { Button } from "@/components/ui/button";
-import { useAuth } from "@/lib/auth/session-context";
-import { useTheme } from "@/lib/theme";
+import { sessionQueryOptions } from "@/lib/queries";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -39,16 +41,14 @@ const EXAMPLE_ROWS = [
 ];
 
 function LandingPage() {
-  const navigate = useNavigate();
-  const { status } = useAuth();
-  const { theme, toggleTheme } = useTheme();
+  const { data: session } = useQuery(sessionQueryOptions);
+  const { resolvedTheme, setTheme } = useTheme();
+  const isDark = resolvedTheme === "dark";
 
-  // Show the marketing content immediately (it should be crawlable and
-  // visible without JS); only redirect signed-in visitors once the shared
-  // auth check (session-context.tsx) knows for sure.
-  useEffect(() => {
-    if (status === "authed") void navigate({ to: "/app" });
-  }, [status, navigate]);
+  // The marketing content renders immediately (it should be crawlable and
+  // visible without JS); signed-in visitors are bounced once the cached
+  // session is known.
+  if (session) return <Navigate to="/app" replace />;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -63,10 +63,10 @@ function LandingPage() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={toggleTheme}
-            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            onClick={() => setTheme(isDark ? "light" : "dark")}
+            aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
           >
-            {theme === "dark" ? <Sun /> : <Moon />}
+            {isDark ? <Sun /> : <Moon />}
           </Button>
           <Link to="/sign-in" className="px-2 text-sm text-muted-foreground hover:text-foreground">
             Sign in

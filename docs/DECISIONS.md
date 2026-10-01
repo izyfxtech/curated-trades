@@ -676,3 +676,68 @@ and risk preview; the risk calculator (now symbol-driven end to end instead of
 a separate manual pip-size/pip-value mode); `PartialExitsPanel` (fills and the
 "remaining" figure are lots, `unit` prop); the trade detail page's Position
 size row; and the playbook "Convert to trade" quantity field.
+
+<a id="d51"></a>
+### 51. Symbol is a dropdown of majors/minors/metals, with a "Custom symbol" fallback
+
+`InstrumentSelect` (components/journal/) replaces the free-text Instrument
+field on every trade form — log/edit trade, the risk calculator, and the
+trade-idea form — with a grouped `Select`: Majors (the 7 USD pairs), Minors &
+crosses (21 common cross pairs), and Metals (gold/silver). The list lives in
+`instruments.ts` (`CURRENCY_PAIR_GROUPS`) next to the sizing logic that
+already knows what each of those symbols is, so the dropdown can never list a
+pair the sizing code doesn't recognize.
+
+Picking "Custom symbol…" reveals a plain text input for anything not listed —
+crypto, stocks, indices — so nothing that worked with free typing stops
+working; it's the same component that used to be a bare `Input`, just gated
+behind one more click. Opening an existing trade whose symbol isn't in the
+list (BTCUSD, a stock ticker) drops straight into custom mode with that value
+already filled in, rather than showing a blank dropdown.
+
+<a id="d52"></a>
+### 52. Money displays use each account's real currency, not a hardcoded $
+
+Every P&L, equity, and risk figure across the app now formats through
+`lib/money.ts` (`formatMoney`, `formatSignedMoney`, `formatMoneyCompact`) with
+the currency that figure actually belongs to, instead of a literal `$` —
+Fixed: the journal table and screenshot gallery, the trade detail page, the
+dashboard, analytics (metrics, equity curve, heatmap, session/breakdown
+panels, generated insight text), reviews (queue and period stats), the app
+bar's equity chip, per-account starting equity in Settings, and the public
+share report.
+
+Two currency conventions are used, matching how the app already treats
+"All accounts" (see DECISIONS #31): a **workspace-level** figure (dashboard
+totals, analytics overall, the equity chip) uses `workspaceCurrency()` — the
+active account's currency, or the portfolio's first account's if none is
+active. A **per-row** figure in a list that can span accounts (the journal
+table, the screenshot gallery, the review queue) uses that row's own
+account's currency via `currencyByAccountId()`, since "All accounts" can show
+trades from accounts in different currencies side by side. The public share
+report picks up the portfolio's first account's currency the same way
+`workspaceCurrency()` does, added as a new `currency` field on `SharedReport`.
+
+Neither convention actually converts between currencies — a workspace-level
+total across accounts of different currencies is still a naive sum, same as
+before. This fix makes the *label* correct for the common case (one currency
+per portfolio); it doesn't add real multi-currency conversion, which would be
+a much bigger feature.
+
+<a id="d53"></a>
+### 53. Onboarding: portfolio and account are separate names, account has a type
+
+Onboarding previously used one `portfolioName` field for both the portfolio's
+name and its first account's name, and labeled the account-type toggle "This
+portfolio is" — but `account_type` lives on the account (see the comment on
+`updatePortfolio`: "moved to the account level"), and `getWorkspace`'s own
+bootstrap defaults them to two different names ("Personal" / "Main" — see
+`ensureDefaultAccount`). Reusing one field silently overwrote the account's
+default name with the portfolio's.
+
+Onboarding now has a separate "Account name" field (initialized from the
+account's actual name, not the portfolio's), the toggle reads "This account
+is", and the account fields are visually grouped under "First account in this
+portfolio" with a line explaining a portfolio can hold more than one account
+later — matching the language Settings already uses for its own
+create-portfolio form.

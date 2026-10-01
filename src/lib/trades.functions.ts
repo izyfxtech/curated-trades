@@ -8,6 +8,9 @@ import { z } from "zod";
 
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { friendlyNotFoundError } from "@/lib/db-errors";
+import { fetchAllRows } from "@/lib/paging";
+import { buildTradesPageQuery } from "@/lib/trades-page-query";
+import { DEFAULT_TRADE_PAGE_SIZE, tradeFilterSchema, tradeSortSchema } from "@/lib/trade-filters";
 import type { Database, Json } from "@/integrations/supabase/types";
 import {
   buildSizingContext,
@@ -226,29 +229,26 @@ async function syncTradeTags(
 
 export { assertOwnsPortfolio, assertOwnsAccountsInPortfolio };
 
-// Single source of truth for "how many trades a page fetches by default".
-// This used to be inconsistent across callers — several pages passed
-// `limit: 500` explicitly, one (the dashboard) passed nothing and silently
-// got a different default — while every one of them shared the exact same
-// TanStack Query cache key (`["trades", portfolioId, ...]`). Since Query
-// dedupes purely by key, whichever page happened to load first within the
-// cache's staleTime "won", and the others silently rendered however many
-// rows that page had asked for — trades could appear to vanish from the
-// Journal for up to 30 seconds after visiting the Dashboard. Every caller
-// now imports this constant, requests it explicitly, and includes it in
-// the query key (see each route's tradesQuery) so a future mismatch fails
-// to compile instead of silently corrupting the cache again.
-export const TRADES_LIST_DEFAULT_LIMIT = 500;
-
 const listTradesSchema = z.object({
   portfolioId: z.string().uuid(),
   // Omitted (or undefined) means "All accounts" — every trade in the
   // portfolio, matching the workspace's own aggregate-scope semantics
   // (see WorkspaceData.activeAccount in portfolios.functions.ts).
   accountId: z.string().uuid().optional(),
-  limit: z.number().int().positive().max(TRADES_LIST_DEFAULT_LIMIT).optional(),
+  /** Only for callers that genuinely want a few rows (e.g. "does this account
+   * have any trades?" asks for 1). Omitted = ALL trades, however many. */
+  limit: z.number().int().positive().max(1000).optional(),
 });
 
+/** Every trade in the portfolio (or the newest `limit`), newest first.
+ *
+ * Used by the screens that compute over the whole history — Overview,
+ * Analytics, Reviews, export. It used to cap at the newest 500 trades and
+ * say nothing about it, which silently corrupted everything derived from it
+ * once a journal grew past that (the equity curve starts from starting equity
+ * and adds up only the trades it was handed). It now reads every row, in
+ * pages (see lib/paging.ts). The Journal table does NOT use this — it has its
+ * own server-side filtered/sorted/paged query, `listTradesPage` below. */
 export const listTrades = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .validator(listTradesSchema)
@@ -259,23 +259,93 @@ export const listTrades = createServerFn({ method: "GET" })
     // to turn that into an error instead.
     const { supabase, userId } = context;
 
-    let query = supabase
-      .from("trades")
-      .select("*")
-      .eq("owner_id", userId)
-      .eq("portfolio_id", data.portfolioId);
-    if (data.accountId) {
-      query = query.eq("account_id", data.accountId);
+    const base = () => {
+      let query = supabase.from("trades").select("*").eq("owner_id", userId).eq("portfolio_id", data.portfolioId);
+      if (data.accountId) query = query.eq("account_id", data.accountId);
+      // `id` tiebreaker keeps range paging stable for trades opened at the same instant.
+      return query.order("opened_at", { ascending: false }).order("id", { ascending: false });
+    };
+
+    if (data.limit) {
+      const { data: trades, error } = await base().limit(data.limit);
+      if (error) throw new Error(error.message);
+      return trades ?? [];
     }
-    const { data: trades, error } = await query
-      .order("opened_at", { ascending: false })
-      .limit(data.limit ?? TRADES_LIST_DEFAULT_LIMIT);
+    return fetchAllRows<TradeRow>((from, to) => base().range(from, to));
+  });
+
+export interface TradePageRow extends TradeRow {
+  /** Ids of the tags on this trade. */
+  tagIds: string[];
+  attachmentCount: number;
+  isReviewed: boolean;
+}
+
+export interface TradePage {
+  rows: TradePageRow[];
+  /** Rows matching the filters across ALL pages, not just this one. */
+  total: number;
+}
+
+const listTradesPageSchema = tradeFilterSchema.merge(tradeSortSchema).extend({
+  portfolioId: z.string().uuid(),
+  accountId: z.string().uuid().optional(),
+  /** Zero-based. */
+  page: z.number().int().min(0).default(0),
+  /** Up to 1,000 so "export everything that matches" can reuse this. */
+  pageSize: z.number().int().min(1).max(1000).default(DEFAULT_TRADE_PAGE_SIZE),
+});
+export type ListTradesPageInput = z.input<typeof listTradesPageSchema>;
+
+/** One page of the Journal: the database filters, sorts and slices, and only
+ * that slice crosses the wire — so the Journal stays fast and complete at any
+ * size instead of loading a capped list and filtering it in the browser.
+ *
+ * Tags, screenshots and reviews live in other tables, so they're filtered with
+ * PostgREST embedded-resource joins: `!inner` keeps only trades that have a
+ * matching child row, and `is.null` on the embed keeps only trades with none.
+ * The per-row tag ids / screenshot count / reviewed flag come back in the same
+ * request (no separate portfolio-wide "all tag links" / "all attachments"
+ * lists, which were themselves silently capped at 1,000 rows). */
+export const listTradesPage = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .validator(listTradesPageSchema)
+  .handler(async ({ context, data }): Promise<TradePage> => {
+    const { supabase, userId } = context;
+
+    const from = data.page * data.pageSize;
+    const { data: rows, error, count } = await buildTradesPageQuery(supabase, userId, data).range(from, from + data.pageSize - 1);
     if (error) throw new Error(error.message);
-    return trades ?? [];
+
+    const pageRows = ((rows ?? []) as unknown as Array<
+      TradeRow & {
+        trade_tags?: { tag_id: string }[] | null;
+        trade_attachments?: { id: string }[] | null;
+        // One-to-one with trades, so PostgREST returns an object (or null), not an array.
+        trade_reviews?: { id: string } | { id: string }[] | null;
+      } & Record<string, unknown>
+    >).map((row): TradePageRow => {
+      const { trade_tags, trade_attachments, trade_reviews, ...rest } = row;
+      // Drop the filter-only join aliases from the row we hand back.
+      for (const key of Object.keys(rest)) {
+        if (key === "tag_any" || key === "shot_filter" || key === "review_filter" || key.startsWith("tag_all_")) {
+          delete (rest as Record<string, unknown>)[key];
+        }
+      }
+      return {
+        ...(rest as TradeRow),
+        tagIds: (trade_tags ?? []).map((link) => link.tag_id),
+        attachmentCount: trade_attachments?.length ?? 0,
+        isReviewed: Array.isArray(trade_reviews) ? trade_reviews.length > 0 : trade_reviews != null,
+      };
+    });
+
+    return { rows: pageRows, total: count ?? pageRows.length };
   });
 
 export interface TradeWithTagNames extends TradeRow {
   tagNames: string[];
+  tagIds: string[];
 }
 
 /** One trade plus its tag names, for the trade detail page ("/app/journal/$tradeId") —
@@ -300,7 +370,7 @@ export const getTrade = createServerFn({ method: "GET" })
 
     const { data: tagLinks, error: tagLinksError } = await supabase
       .from("trade_tags")
-      .select("tags(name)")
+      .select("tag_id, tags(name)")
       .eq("owner_id", userId)
       .eq("trade_id", data.tradeId);
     if (tagLinksError) throw new Error(tagLinksError.message);
@@ -308,8 +378,9 @@ export const getTrade = createServerFn({ method: "GET" })
     const tagNames = (tagLinks ?? [])
       .map((link) => (link.tags as { name: string } | null)?.name)
       .filter((name): name is string => Boolean(name));
+    const tagIds = (tagLinks ?? []).map((link) => link.tag_id);
 
-    return { ...trade, tagNames };
+    return { ...trade, tagNames, tagIds };
   });
 
 export interface TradeTagLink {
@@ -327,13 +398,14 @@ export const listTradeTagLinks = createServerFn({ method: "GET" })
   .validator(z.object({ portfolioId: z.string().uuid().optional() }))
   .handler(async ({ context, data }): Promise<TradeTagLink[]> => {
     const { supabase, userId } = context;
-    let query = supabase.from("trade_tags").select("trade_id, tag_id, trades!inner(portfolio_id)").eq("owner_id", userId);
-    if (data.portfolioId) {
-      query = query.eq("trades.portfolio_id", data.portfolioId);
-    }
-    const { data: rows, error } = await query;
-    if (error) throw new Error(error.message);
-    return (rows ?? []).map((row) => ({ trade_id: row.trade_id, tag_id: row.tag_id }));
+    const rows = await fetchAllRows((from, to) => {
+      let query = supabase.from("trade_tags").select("trade_id, tag_id, trades!inner(portfolio_id)").eq("owner_id", userId);
+      if (data.portfolioId) {
+        query = query.eq("trades.portfolio_id", data.portfolioId);
+      }
+      return query.order("trade_id").order("tag_id").range(from, to);
+    });
+    return rows.map((row) => ({ trade_id: row.trade_id, tag_id: row.tag_id }));
   });
 
 export const createTrade = createServerFn({ method: "POST" })

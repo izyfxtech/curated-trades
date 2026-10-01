@@ -7,11 +7,12 @@
 // were no weekday/month labels to orient against, and the range was always
 // exactly 35 days regardless of what date range the rest of the page was
 // showing.
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { addDays, differenceInCalendarDays, format, isWithinInterval, startOfDay, startOfWeek } from "date-fns";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { formatSignedMoney } from "@/lib/money";
 
 interface PnlHeatmapProps {
   /** Realized P&L per day, keyed by `yyyy-MM-dd` in local time. */
@@ -22,6 +23,7 @@ interface PnlHeatmapProps {
   start: Date;
   end: Date;
   onSelectDay?: (iso: string) => void;
+  currency?: string;
 }
 
 const WEEKDAY_ROW_LABELS: Record<number, string> = { 0: "Mon", 2: "Wed", 4: "Fri" };
@@ -31,10 +33,10 @@ const WEEKDAY_ROW_LABELS: Record<number, string> = { 0: "Mon", 2: "Wed", 4: "Fri
 // growing forever.
 const MAX_DAYS = 371;
 
-export function PnlHeatmap({ pnlByDay, start, end, onSelectDay }: PnlHeatmapProps) {
+export function PnlHeatmap({ pnlByDay, start, end, onSelectDay, currency = "USD" }: PnlHeatmapProps) {
   const [hoveredIso, setHoveredIso] = useState<string | null>(null);
 
-  const { weeks, monthLabels, maxAbsPnl, clampedStart } = useMemo(() => {
+  const { weeks, monthLabels, maxAbsPnl, clampedStart } = (() => {
     const rangeEnd = startOfDay(end);
     const rawStart = startOfDay(start);
     const cappedStart =
@@ -70,7 +72,7 @@ export function PnlHeatmap({ pnlByDay, start, end, onSelectDay }: PnlHeatmapProp
     }
 
     return { weeks, monthLabels, maxAbsPnl, clampedStart: cappedStart };
-  }, [pnlByDay, start, end]);
+  })();
 
   const wasClamped = differenceInCalendarDays(startOfDay(end), startOfDay(start)) > MAX_DAYS;
 
@@ -134,7 +136,7 @@ export function PnlHeatmap({ pnlByDay, start, end, onSelectDay }: PnlHeatmapProp
                   <TooltipContent>
                     {format(day.date, "EEE, MMM d, yyyy")}
                     {" — "}
-                    {day.pnl == null ? "no closed trades" : `${day.pnl >= 0 ? "+" : "−"}$${Math.abs(day.pnl).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+                    {day.pnl == null ? "no closed trades" : formatSignedMoney(day.pnl, currency)}
                   </TooltipContent>
                 </Tooltip>
               );

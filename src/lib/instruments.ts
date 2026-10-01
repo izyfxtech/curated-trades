@@ -238,3 +238,74 @@ export function pipValuePerLot(ctx: SizingContext, price: number): number | null
   if (!ctx.spec.pipSize) return null;
   return ctx.spec.pipSize * ctx.contractSize * ctx.rateAt(price);
 }
+
+// ---------------------------------------------------------------------------
+// Curated pair list for the dropdown on trade forms
+// ---------------------------------------------------------------------------
+
+export interface InstrumentOption {
+  symbol: string;
+  label: string;
+}
+
+export interface InstrumentOptionGroup {
+  group: string;
+  options: InstrumentOption[];
+}
+
+/** Sentinel Select value for "not one of the listed pairs" — free-text entry (crypto, stocks, indices…). */
+export const CUSTOM_SYMBOL_VALUE = "__custom__";
+
+export const CURRENCY_PAIR_GROUPS: InstrumentOptionGroup[] = [
+  {
+    group: "Majors",
+    options: [
+      { symbol: "EURUSD", label: "EUR/USD" },
+      { symbol: "GBPUSD", label: "GBP/USD" },
+      { symbol: "USDJPY", label: "USD/JPY" },
+      { symbol: "USDCHF", label: "USD/CHF" },
+      { symbol: "USDCAD", label: "USD/CAD" },
+      { symbol: "AUDUSD", label: "AUD/USD" },
+      { symbol: "NZDUSD", label: "NZD/USD" },
+    ],
+  },
+  {
+    group: "Minors & crosses",
+    options: [
+      { symbol: "EURGBP", label: "EUR/GBP" },
+      { symbol: "EURJPY", label: "EUR/JPY" },
+      { symbol: "EURCHF", label: "EUR/CHF" },
+      { symbol: "EURAUD", label: "EUR/AUD" },
+      { symbol: "EURCAD", label: "EUR/CAD" },
+      { symbol: "EURNZD", label: "EUR/NZD" },
+      { symbol: "GBPJPY", label: "GBP/JPY" },
+      { symbol: "GBPCHF", label: "GBP/CHF" },
+      { symbol: "GBPAUD", label: "GBP/AUD" },
+      { symbol: "GBPCAD", label: "GBP/CAD" },
+      { symbol: "GBPNZD", label: "GBP/NZD" },
+      { symbol: "AUDJPY", label: "AUD/JPY" },
+      { symbol: "AUDNZD", label: "AUD/NZD" },
+      { symbol: "AUDCAD", label: "AUD/CAD" },
+      { symbol: "AUDCHF", label: "AUD/CHF" },
+      { symbol: "NZDJPY", label: "NZD/JPY" },
+      { symbol: "NZDCAD", label: "NZD/CAD" },
+      { symbol: "NZDCHF", label: "NZD/CHF" },
+      { symbol: "CADJPY", label: "CAD/JPY" },
+      { symbol: "CADCHF", label: "CAD/CHF" },
+      { symbol: "CHFJPY", label: "CHF/JPY" },
+    ],
+  },
+  {
+    group: "Metals",
+    options: [
+      { symbol: "XAUUSD", label: "Gold (XAU/USD)" },
+      { symbol: "XAGUSD", label: "Silver (XAG/USD)" },
+    ],
+  },
+];
+
+const KNOWN_SYMBOLS = new Set(CURRENCY_PAIR_GROUPS.flatMap((group) => group.options.map((option) => option.symbol)));
+
+export function isListedSymbol(symbol: string): boolean {
+  return KNOWN_SYMBOLS.has(cleanSymbol(symbol));
+}

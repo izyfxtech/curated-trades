@@ -8,35 +8,33 @@
 // with is_required distinguishing the two) — see the migration comment in
 // supabase/migrations/20260908120000_phase2_playbooks_and_ideas.sql for why
 // that unification was chosen over two separate lists.
-import { createFileRoute } from "@tanstack/react-router";
+//
+// Page state is in the URL: ?tab=ideas, ?edit=new|<playbookId> (the editor
+// modal) and ?convert=<ideaId> (the convert-to-trade dialog). The idea form
+// and the convert dialog are TanStack Forms; confirmations are toasts.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, type FormEvent } from "react";
-import { BookOpen, Check, Lightbulb, Plus, Trash2 } from "lucide-react";
+import { createFileRoute } from "@tanstack/react-router";
+import { BookOpen, Lightbulb, Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { z } from "zod";
 
+import { InstrumentSelect } from "@/components/journal/InstrumentSelect";
+import { PlaybookEditorModal, type PlaybookFormValues } from "@/components/playbooks/PlaybookEditorModal";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
-import { PlaybookEditorModal, type PlaybookFormValues } from "@/components/playbooks/PlaybookEditorModal";
-import { getWorkspace } from "@/lib/portfolios.functions";
-import {
-  deletePlaybook,
-  listPlaybooks,
-  savePlaybook,
-  setPlaybookStatus,
-  type PlaybookWithChecklist,
-} from "@/lib/playbooks.functions";
-import {
-  createTradeIdea,
-  deleteTradeIdea,
-  listTradeIdeas,
-  setTradeIdeaStatus,
-} from "@/lib/trade-ideas.functions";
-import { createTrade } from "@/lib/trades.functions";
-import { getInstrumentSpec, sizeLabel } from "@/lib/instruments";
 import type { Database } from "@/integrations/supabase/types";
+import { FieldMessage, formProps, useAppForm } from "@/lib/form";
+import { getInstrumentSpec, sizeLabel } from "@/lib/instruments";
+import { deletePlaybook, savePlaybook, setPlaybookStatus } from "@/lib/playbooks.functions";
+import {
+  playbooksQueryOptions,
+  queryKeys,
+  tradeIdeasQueryOptions,
+  workspaceQueryOptions,
+} from "@/lib/queries";
+import { createTradeIdea, deleteTradeIdea, setTradeIdeaStatus } from "@/lib/trade-ideas.functions";
+import { createTrade } from "@/lib/trades.functions";
 
 type TradeIdeaRow = Database["public"]["Tables"]["trade_ideas"]["Row"];
 
@@ -47,13 +45,36 @@ export const Route = createFileRoute("/app/playbooks")({
       { name: "description", content: "Define your setups and pre-trade checklists, and track ideas before they become trades." },
     ],
   }),
+  validateSearch: z.object({
+    tab: z.enum(["playbooks", "ideas"]).optional(),
+    /** "new", or the id of the playbook open in the editor. */
+    edit: z.string().optional(),
+    /** Id of the idea open in the convert-to-trade dialog. */
+    convert: z.string().optional(),
+  }),
   component: PlaybooksPage,
 });
 
-const emptyIdeaForm = {
+const DIRECTION_OPTIONS = [
+  { value: "long", label: "Long" },
+  { value: "short", label: "Short" },
+] as const;
+
+const optionalNumber = z.string().refine((value) => value === "" || Number.isFinite(Number(value)), "Enter a number");
+const ideaSchema = z.object({
+  symbol: z.string().trim().min(1, "Enter a symbol first"),
+  market: z.enum(["forex", "crypto"]),
+  direction: z.enum(["long", "short"]),
+  playbookId: z.string(),
+  plannedEntry: optionalNumber,
+  plannedStop: optionalNumber,
+  plannedTarget: optionalNumber,
+  notes: z.string(),
+});
+const emptyIdeaForm: z.infer<typeof ideaSchema> = {
   symbol: "",
-  market: "forex" as "forex" | "crypto",
-  direction: "long" as "long" | "short",
+  market: "forex",
+  direction: "long",
   playbookId: "none",
   plannedEntry: "",
   plannedStop: "",
@@ -68,41 +89,89 @@ function plannedR(idea: TradeIdeaRow): number | null {
   return Math.abs(idea.planned_target - idea.planned_entry) / risk;
 }
 
+
+const convertSchema = z.object({
+  quantity: z.string().refine((value) => Number.isFinite(Number(value)) && Number(value) > 0, "Enter a valid quantity"),
+});
+
+function ConvertIdeaDialog({
+  idea,
+  isPending,
+  onClose,
+  onConvert,
+}: {
+  idea: TradeIdeaRow;
+  isPending: boolean;
+  onClose: () => void;
+  onConvert: (quantity: number) => void;
+}) {
+  const spec = getInstrumentSpec(idea.symbol);
+  const form = useAppForm({
+    defaultValues: { quantity: "" },
+    validators: { onSubmit: convertSchema },
+    onSubmit: ({ value }) => onConvert(Number(value.quantity)),
+  });
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle id="convert-idea-title">Convert to trade</DialogTitle>
+        </DialogHeader>
+        <form {...formProps(form)} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6">
+          <p className="text-sm text-muted-foreground">
+            Opens a trade for <span className="font-medium text-foreground">{idea.symbol}</span> at the idea's planned entry,
+            stop, and target. You can edit everything else afterward in the Journal.
+          </p>
+          <form.AppField name="quantity">
+            {(field) => (
+              <field.TextField
+                label={sizeLabel(spec).noun}
+                type="number"
+                step={spec.sizeUnit === "lots" ? "0.01" : "any"}
+                min="0"
+                className="font-mono"
+                placeholder={sizeLabel(spec).placeholder}
+                autoFocus
+              />
+            )}
+          </form.AppField>
+          <div className="flex gap-3 pt-2">
+            <Button type="button" variant="outline" className="flex-1" onClick={onClose}>
+              Cancel
+            </Button>
+            <form.AppForm>
+              <form.SubmitButton className="flex-1" pendingLabel="Creating…" pending={isPending}>
+                Create trade
+              </form.SubmitButton>
+            </form.AppForm>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function PlaybooksPage() {
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<"playbooks" | "ideas">("playbooks");
-  const [notice, setNotice] = useState("");
+  const navigate = Route.useNavigate();
+  const search = Route.useSearch();
+  const tab = search.tab ?? "playbooks";
+  const setSearch = (patch: { tab?: "playbooks" | "ideas" | undefined; edit?: string | undefined; convert?: string | undefined }) =>
+    void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
 
-  function showNotice(message: string, ms = 3000) {
-    setNotice(message);
-    window.setTimeout(() => setNotice(""), ms);
-  }
-
-  const workspaceQuery = useQuery({ queryKey: ["workspace"], queryFn: () => getWorkspace() });
-  const workspace = workspaceQuery.data;
+  const { data: workspace } = useQuery(workspaceQueryOptions);
   const activePortfolioId = workspace?.activePortfolio.id;
 
-  const playbooksQuery = useQuery({ queryKey: ["playbooks"], queryFn: () => listPlaybooks() });
-  const playbooks = playbooksQuery.data ?? [];
-  const activePlaybooks = useMemo(() => playbooks.filter((p) => p.status === "active"), [playbooks]);
+  const { data: playbooks = [] } = useQuery(playbooksQueryOptions);
+  const activePlaybooks = playbooks.filter((p) => p.status === "active");
+  const { data: ideas = [] } = useQuery(tradeIdeasQueryOptions(activePortfolioId));
 
-  const ideasQuery = useQuery({
-    queryKey: ["trade-ideas", activePortfolioId],
-    queryFn: () => listTradeIdeas({ data: { portfolioId: activePortfolioId as string } }),
-    enabled: activePortfolioId != null,
-  });
-  const ideas = ideasQuery.data ?? [];
-
-  function invalidatePlaybooks() {
-    void queryClient.invalidateQueries({ queryKey: ["playbooks"] });
-  }
-  function invalidateIdeas() {
-    void queryClient.invalidateQueries({ queryKey: ["trade-ideas", activePortfolioId] });
-  }
+  const invalidatePlaybooks = () => queryClient.invalidateQueries({ queryKey: queryKeys.playbooks });
+  const invalidateIdeas = () => queryClient.invalidateQueries({ queryKey: tradeIdeasQueryOptions(activePortfolioId).queryKey });
 
   // --- Playbooks ---
-  const [isEditorOpen, setIsEditorOpen] = useState(false);
-  const [editingPlaybook, setEditingPlaybook] = useState<PlaybookWithChecklist | null>(null);
+  const editingPlaybook = search.edit && search.edit !== "new" ? (playbooks.find((p) => p.id === search.edit) ?? null) : null;
+  const isEditorOpen = search.edit === "new" || editingPlaybook != null;
 
   const saveMutation = useMutation({
     mutationFn: (values: PlaybookFormValues) =>
@@ -119,12 +188,11 @@ function PlaybooksPage() {
         },
       }),
     onSuccess: () => {
-      invalidatePlaybooks();
-      showNotice(editingPlaybook ? "Playbook updated" : "Playbook created");
-      setIsEditorOpen(false);
-      setEditingPlaybook(null);
+      void invalidatePlaybooks();
+      toast.success(editingPlaybook ? "Playbook updated" : "Playbook created");
+      setSearch({ edit: undefined });
     },
-    onError: () => showNotice("Couldn't save playbook"),
+    onError: () => toast.error("Couldn't save playbook"),
   });
 
   const statusMutation = useMutation({
@@ -135,42 +203,43 @@ function PlaybooksPage() {
   const deleteMutation = useMutation({
     mutationFn: (playbookId: string) => deletePlaybook({ data: { playbookId } }),
     onSuccess: () => {
-      invalidatePlaybooks();
-      showNotice("Playbook deleted");
+      void invalidatePlaybooks();
+      toast.success("Playbook deleted");
     },
   });
 
   // --- Ideas ---
-  const [ideaForm, setIdeaForm] = useState(emptyIdeaForm);
-  const [convertingIdea, setConvertingIdea] = useState<TradeIdeaRow | null>(null);
-  const [convertQuantity, setConvertQuantity] = useState("");
-
   const createIdeaMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: (values: z.infer<typeof ideaSchema>) => {
       if (!activePortfolioId) throw new Error("No active portfolio");
-      const entry = ideaForm.plannedEntry === "" ? null : Number(ideaForm.plannedEntry);
-      const stop = ideaForm.plannedStop === "" ? null : Number(ideaForm.plannedStop);
-      const target = ideaForm.plannedTarget === "" ? null : Number(ideaForm.plannedTarget);
+      const num = (value: string) => (value === "" ? null : Number(value));
       return createTradeIdea({
         data: {
           portfolioId: activePortfolioId,
-          playbookId: ideaForm.playbookId === "none" ? null : ideaForm.playbookId,
-          symbol: ideaForm.symbol.trim().toUpperCase(),
-          market: ideaForm.market,
-          direction: ideaForm.direction,
-          plannedEntry: entry,
-          plannedStop: stop,
-          plannedTarget: target,
-          notes: ideaForm.notes.trim() || null,
+          playbookId: values.playbookId === "none" ? null : values.playbookId,
+          symbol: values.symbol.trim().toUpperCase(),
+          market: values.market,
+          direction: values.direction,
+          plannedEntry: num(values.plannedEntry),
+          plannedStop: num(values.plannedStop),
+          plannedTarget: num(values.plannedTarget),
+          notes: values.notes.trim() || null,
         },
       });
     },
     onSuccess: () => {
-      invalidateIdeas();
-      setIdeaForm(emptyIdeaForm);
-      showNotice("Idea logged");
+      void invalidateIdeas();
+      ideaForm.reset();
+      toast.success("Idea logged");
     },
-    onError: () => showNotice("Check the idea fields — something's missing or invalid"),
+    onError: () => toast.error("Check the idea fields — something's missing or invalid"),
+  });
+
+  const ideaForm = useAppForm({
+    defaultValues: emptyIdeaForm,
+    validators: { onSubmit: ideaSchema },
+    onSubmit: ({ value }) => createIdeaMutation.mutate(value),
+    onSubmitInvalid: () => toast.error("Check the idea fields — something's missing or invalid"),
   });
 
   const ideaStatusMutation = useMutation({
@@ -184,57 +253,47 @@ function PlaybooksPage() {
     onSuccess: invalidateIdeas,
   });
 
+  const convertingIdea = search.convert ? (ideas.find((idea) => idea.id === search.convert) ?? null) : null;
+
   const convertMutation = useMutation({
-    mutationFn: async () => {
-      if (!convertingIdea || !activePortfolioId) throw new Error("Nothing to convert");
+    mutationFn: async ({ idea, quantity }: { idea: TradeIdeaRow; quantity: number }) => {
+      if (!activePortfolioId) throw new Error("Nothing to convert");
       const accountId = workspace?.activeAccount?.id ?? workspace?.accounts[0]?.id;
       if (!accountId) throw new Error("No account to log this trade against");
-      const quantity = Number(convertQuantity);
-      if (!Number.isFinite(quantity) || quantity <= 0) throw new Error("Enter a valid quantity");
-      if (convertingIdea.planned_entry == null) throw new Error("This idea has no planned entry price");
+      if (idea.planned_entry == null) throw new Error("This idea has no planned entry price");
 
       const [trade] = await createTrade({
         data: {
           portfolioId: activePortfolioId,
           accountIds: [accountId],
-          symbol: convertingIdea.symbol,
-          direction: convertingIdea.direction === "short" ? "short" : "long",
+          symbol: idea.symbol,
+          direction: idea.direction === "short" ? "short" : "long",
           status: "open",
           openedAt: new Date().toISOString(),
-          entryPrice: convertingIdea.planned_entry,
+          entryPrice: idea.planned_entry,
           quantity,
-          stopLoss: convertingIdea.planned_stop ?? null,
-          takeProfit: convertingIdea.planned_target ?? null,
+          stopLoss: idea.planned_stop ?? null,
+          takeProfit: idea.planned_target ?? null,
           fees: 0,
           spreadCost: 0,
           swapFunding: 0,
           isPlanned: true,
-          playbookId: convertingIdea.playbook_id,
-          notes: convertingIdea.notes,
+          playbookId: idea.playbook_id,
+          notes: idea.notes,
           tagIds: [],
         },
       });
 
-      await setTradeIdeaStatus({ data: { ideaId: convertingIdea.id, status: "taken", takenTradeId: trade!.id } });
+      await setTradeIdeaStatus({ data: { ideaId: idea.id, status: "taken", takenTradeId: trade!.id } });
     },
     onSuccess: () => {
-      invalidateIdeas();
-      void queryClient.invalidateQueries({ queryKey: ["trades", activePortfolioId] });
-      setConvertingIdea(null);
-      setConvertQuantity("");
-      showNotice("Trade logged from idea");
+      void invalidateIdeas();
+      void queryClient.invalidateQueries({ queryKey: queryKeys.trades(activePortfolioId) });
+      setSearch({ convert: undefined });
+      toast.success("Trade logged from idea");
     },
-    onError: (error: Error) => showNotice(error.message || "Couldn't convert idea to a trade"),
+    onError: (error) => toast.error(error.message || "Couldn't convert idea to a trade"),
   });
-
-  function submitIdea(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!ideaForm.symbol.trim()) {
-      showNotice("Enter a symbol first");
-      return;
-    }
-    createIdeaMutation.mutate();
-  }
 
   const pendingIdeas = ideas.filter((i) => i.status === "pending");
   const takenIdeas = ideas.filter((i) => i.status === "taken");
@@ -245,7 +304,7 @@ function PlaybooksPage() {
   const avg = (values: number[]) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
   const showMissedComparison = takenPlannedRs.length >= 3 && missedPlannedRs.length >= 3;
 
-  if (workspaceQuery.isLoading || !workspace) {
+  if (!workspace) {
     return <p className="py-10 text-center text-sm text-muted-foreground">Loading playbooks…</p>;
   }
 
@@ -254,10 +313,10 @@ function PlaybooksPage() {
       <section className="mb-6 flex flex-col justify-between gap-4 border-b border-border pb-5 sm:flex-row sm:items-center">
         <h1 className="page-title">Playbooks</h1>
         <div className="direction-toggle">
-          <Button type="button" variant={tab === "playbooks" ? "secondary" : "ghost"} onClick={() => setTab("playbooks")}>
+          <Button type="button" variant={tab === "playbooks" ? "secondary" : "ghost"} onClick={() => setSearch({ tab: undefined })}>
             <BookOpen /> Playbooks
           </Button>
-          <Button type="button" variant={tab === "ideas" ? "secondary" : "ghost"} onClick={() => setTab("ideas")}>
+          <Button type="button" variant={tab === "ideas" ? "secondary" : "ghost"} onClick={() => setSearch({ tab: "ideas" })}>
             <Lightbulb /> Trade ideas
           </Button>
         </div>
@@ -266,12 +325,7 @@ function PlaybooksPage() {
       {tab === "playbooks" && (
         <>
           <div className="mb-4 flex justify-end">
-            <Button
-              onClick={() => {
-                setEditingPlaybook(null);
-                setIsEditorOpen(true);
-              }}
-            >
+            <Button onClick={() => setSearch({ edit: "new" })}>
               <Plus /> New playbook
             </Button>
           </div>
@@ -299,10 +353,7 @@ function PlaybooksPage() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => {
-                        setEditingPlaybook(playbook);
-                        setIsEditorOpen(true);
-                      }}
+                      onClick={() => setSearch({ edit: playbook.id })}
                     >
                       Edit
                     </Button>
@@ -342,101 +393,61 @@ function PlaybooksPage() {
 
       {tab === "ideas" && (
         <div className="space-y-6">
-          <form onSubmit={submitIdea} className="surface-panel grid gap-3 sm:grid-cols-6">
+          <form {...formProps(ideaForm)} className="surface-panel grid items-start gap-3 sm:grid-cols-6">
             <div className="sm:col-span-1">
-              <label htmlFor="idea-symbol" className="field-label">
-                Symbol
-              </label>
-              <Input
-                id="idea-symbol"
-                value={ideaForm.symbol}
-                onChange={(e) => setIdeaForm({ ...ideaForm, symbol: e.target.value })}
-                placeholder="EURUSD"
-              />
+              <ideaForm.AppField name="symbol">
+                {(field) => (
+                  <div>
+                    <label htmlFor="idea-symbol" className="field-label">
+                      Symbol
+                    </label>
+                    <InstrumentSelect id="idea-symbol" value={field.state.value} onChange={field.handleChange} />
+                    <FieldMessage />
+                  </div>
+                )}
+              </ideaForm.AppField>
             </div>
             <div className="sm:col-span-1">
-              <span className="field-label">Direction</span>
-              <Select value={ideaForm.direction} onValueChange={(v: "long" | "short") => setIdeaForm({ ...ideaForm, direction: v })}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="long">Long</SelectItem>
-                  <SelectItem value="short">Short</SelectItem>
-                </SelectContent>
-              </Select>
+              <ideaForm.AppField name="direction">
+                {(field) => <field.SelectField label="Direction" options={DIRECTION_OPTIONS} />}
+              </ideaForm.AppField>
             </div>
             <div className="sm:col-span-2">
-              <span className="field-label">Playbook</span>
-              <Select value={ideaForm.playbookId} onValueChange={(v) => setIdeaForm({ ...ideaForm, playbookId: v })}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">No playbook</SelectItem>
-                  {activePlaybooks.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <ideaForm.AppField name="playbookId">
+                {(field) => (
+                  <field.SelectField
+                    label="Playbook"
+                    options={[{ value: "none", label: "No playbook" }, ...activePlaybooks.map((p) => ({ value: p.id, label: p.name }))]}
+                  />
+                )}
+              </ideaForm.AppField>
             </div>
             <div className="sm:col-span-1">
-              <label htmlFor="idea-entry" className="field-label">
-                Entry
-              </label>
-              <Input
-                id="idea-entry"
-                type="number"
-                step="any"
-                className="font-mono"
-                value={ideaForm.plannedEntry}
-                onChange={(e) => setIdeaForm({ ...ideaForm, plannedEntry: e.target.value })}
-              />
+              <ideaForm.AppField name="plannedEntry">
+                {(field) => <field.TextField label="Entry" type="number" step="any" className="font-mono" />}
+              </ideaForm.AppField>
             </div>
             <div className="sm:col-span-1">
-              <label htmlFor="idea-stop" className="field-label">
-                Stop
-              </label>
-              <Input
-                id="idea-stop"
-                type="number"
-                step="any"
-                className="font-mono"
-                value={ideaForm.plannedStop}
-                onChange={(e) => setIdeaForm({ ...ideaForm, plannedStop: e.target.value })}
-              />
+              <ideaForm.AppField name="plannedStop">
+                {(field) => <field.TextField label="Stop" type="number" step="any" className="font-mono" />}
+              </ideaForm.AppField>
             </div>
             <div className="sm:col-span-1">
-              <label htmlFor="idea-target" className="field-label">
-                Target
-              </label>
-              <Input
-                id="idea-target"
-                type="number"
-                step="any"
-                className="font-mono"
-                value={ideaForm.plannedTarget}
-                onChange={(e) => setIdeaForm({ ...ideaForm, plannedTarget: e.target.value })}
-              />
+              <ideaForm.AppField name="plannedTarget">
+                {(field) => <field.TextField label="Target" type="number" step="any" className="font-mono" />}
+              </ideaForm.AppField>
             </div>
             <div className="sm:col-span-5">
-              <label htmlFor="idea-notes" className="field-label">
-                Notes
-              </label>
-              <Textarea
-                id="idea-notes"
-                rows={1}
-                value={ideaForm.notes}
-                onChange={(e) => setIdeaForm({ ...ideaForm, notes: e.target.value })}
-                placeholder="Why this setup, what you're waiting for"
-              />
+              <ideaForm.AppField name="notes">
+                {(field) => <field.TextareaField label="Notes" rows={1} placeholder="Why this setup, what you're waiting for" />}
+              </ideaForm.AppField>
             </div>
             <div className="flex items-end sm:col-span-1">
-              <Button type="submit" className="w-full" disabled={createIdeaMutation.isPending}>
-                <Plus /> Log idea
-              </Button>
+              <ideaForm.AppForm>
+                <ideaForm.SubmitButton className="w-full" pending={createIdeaMutation.isPending}>
+                  <Plus /> Log idea
+                </ideaForm.SubmitButton>
+              </ideaForm.AppForm>
             </div>
           </form>
 
@@ -502,10 +513,7 @@ function PlaybooksPage() {
                                         type="button"
                                         variant="outline"
                                         size="sm"
-                                        onClick={() => {
-                                          setConvertingIdea(idea);
-                                          setConvertQuantity("");
-                                        }}
+                                        onClick={() => setSearch({ convert: idea.id })}
                                       >
                                         Convert to trade
                                       </Button>
@@ -561,69 +569,24 @@ function PlaybooksPage() {
         </div>
       )}
 
-      {notice && (
-        <div className="toast-message">
-          <Check className="size-4 text-chart-2" />
-          {notice}
-        </div>
-      )}
-
       {isEditorOpen && (
         <PlaybookEditorModal
+          key={editingPlaybook?.id ?? "new"}
           playbook={editingPlaybook}
           userId={workspace.profile.user_id}
           isSubmitting={saveMutation.isPending}
-          onClose={() => {
-            setIsEditorOpen(false);
-            setEditingPlaybook(null);
-          }}
+          onClose={() => setSearch({ edit: undefined })}
           onSave={(values) => saveMutation.mutate(values)}
         />
       )}
 
       {convertingIdea && (
-        <Dialog open onOpenChange={(open) => { if (!open) setConvertingIdea(null); }}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle id="convert-idea-title">Convert to trade</DialogTitle>
-            </DialogHeader>
-            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6">
-              <p className="text-sm text-muted-foreground">
-                Opens a trade for <span className="font-medium text-foreground">{convertingIdea.symbol}</span> at
-                the idea's planned entry, stop, and target. You can edit everything else afterward in the Journal.
-              </p>
-              <div>
-                <label htmlFor="convert-quantity" className="field-label">
-                  {sizeLabel(getInstrumentSpec(convertingIdea.symbol)).noun}
-                </label>
-                <Input
-                  id="convert-quantity"
-                  type="number"
-                  step={getInstrumentSpec(convertingIdea.symbol).sizeUnit === "lots" ? "0.01" : "any"}
-                  min="0"
-                  className="font-mono"
-                  value={convertQuantity}
-                  onChange={(e) => setConvertQuantity(e.target.value)}
-                  placeholder={sizeLabel(getInstrumentSpec(convertingIdea.symbol)).placeholder}
-                  autoFocus
-                />
-              </div>
-              <div className="flex gap-3 pt-2">
-                <Button type="button" variant="outline" className="flex-1" onClick={() => setConvertingIdea(null)}>
-                  Cancel
-                </Button>
-                <Button
-                  type="button"
-                  className="flex-1"
-                  disabled={convertMutation.isPending}
-                  onClick={() => convertMutation.mutate()}
-                >
-                  {convertMutation.isPending ? "Creating…" : "Create trade"}
-                </Button>
-              </div>
-            </div>
-          </DialogContent>
-        </Dialog>
+        <ConvertIdeaDialog
+          idea={convertingIdea}
+          isPending={convertMutation.isPending}
+          onClose={() => setSearch({ convert: undefined })}
+          onConvert={(quantity) => convertMutation.mutate({ idea: convertingIdea, quantity })}
+        />
       )}
     </>
   );
